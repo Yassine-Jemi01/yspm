@@ -102,3 +102,7 @@ These references are used for studying package-management concepts such as repos
 The metadata model already carries `os` and `architecture`, so additional targets can be added later without changing the CLI.
 
 This is the **first release** of yspm and is intended as a small, understandable foundation for future package-management features.
+
+## License
+
+yspm is licensed under the GNU General Public License v3.0.
