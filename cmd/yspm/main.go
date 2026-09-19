@@ -212,6 +212,6 @@ func printInfo(p model.Package){
 
 func has(xs []string,want string)bool{for _,x:=range xs{if x==want{return true}};return false}
 func valueAfter(xs []string,want string)string{for i,x:=range xs{if x==want&&i+1<len(xs){return xs[i+1]};if strings.HasPrefix(x,want+"="){return strings.TrimPrefix(x,want+"=")}};return ""}
-func strip(xs []string,wants ...string)[]string{out:=[]string{};skip:=false;set:=map[string]bool{};for _,w:=range wants{set[w]=true};for i,x:=range xs{if skip{skip=false;continue};if set[x]{if x=="--arch"{skip=true};continue};if strings.HasPrefix(x,"--arch="){continue};out=append(out,x)};return out}
+func strip(xs []string,wants ...string)[]string{out:=[]string{};skip:=false;set:=map[string]bool{};for _,w:=range wants{set[w]=true};for _,x:=range xs{if skip{skip=false;continue};if set[x]{if x=="--arch"{skip=true};continue};if strings.HasPrefix(x,"--arch="){continue};out=append(out,x)};return out}
 func value(s string)string{if s==""{return "none"};return s}
 func fatal(message string){fmt.Fprintf(os.Stderr,"yspm: %s\n",message);os.Exit(1)}
