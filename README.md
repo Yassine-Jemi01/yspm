@@ -167,6 +167,26 @@ YSPM_BIN_DIR
 YSPM_APPLICATIONS_DIR
 ```
 
+## Requirements
+
+- Go 1.23 or newer
+- Git
+
+Install Go using the [official installation instructions](https://go.dev/doc/install).
+
+On Debian/Ubuntu systems, you can also install Go from the distribution repositories:
+
+```bash
+sudo apt update
+sudo apt install golang-go
+```
+
+The distribution package may provide a different Go version than the one currently required by this project, so check with:
+
+```bash
+go version
+```
+
 ## Build and test
 
 ```bash
