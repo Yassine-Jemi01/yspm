@@ -372,6 +372,10 @@ func (m *Manager) commitPackage(sp stagedPackage,db model.Database,rb *transacti
 		if !within(m.Paths.Root,target){return fmt.Errorf("package path escapes root: %s",e.Path)}
 		if err:=os.MkdirAll(filepath.Dir(target),0o755);err!=nil{return err}
 		if existing,err:=os.Lstat(target);err==nil{
+			if owner,ok:=ownerForPath(db,e.Path);!ok&&!isConfig(sp.Pkg,e.Path){
+				return fmt.Errorf("refusing to overwrite unowned file %s",e.Path)
+			}
+
 			if isConfig(sp.Pkg,e.Path){
 				if old,ok:=findPreviousConfigHash(db,e.Path);ok&&hashPath(target)==old{
 					backup:=filepath.Join(sp.Stage,".backup",rel);if err:=os.MkdirAll(filepath.Dir(backup),0o755);err!=nil{return err};if err:=os.Rename(target,backup);err!=nil{return err};rb.entries=append(rb.entries,rollbackEntry{target:target,backup:backup})
@@ -563,3 +567,11 @@ func boolText(v bool)string{if v{return"1"};return"0"}
 func newID()string{return fmt.Sprintf("%x",time.Now().UnixNano())}
 
 func escapeDesktopText(s string) string { s=strings.ReplaceAll(s,"\\","\\\\"); return strings.ReplaceAll(strings.ReplaceAll(s,"\n"," "),";","\\;") }
+
+func ownerForPath(db model.Database,path string)(string,bool){
+	for name,p:=range db.Packages{
+		for _,f:=range p.Files{if f==path{return name,true}}
+		for _,e:=range p.Manifest{if e.Path==path{return name,true}}
+	}
+	return "",false
+}
