@@ -10,13 +10,20 @@ import (
 	"github.com/Yassine-Jemi01/yspm/internal/model"
 )
 
-func LoadDB() (model.Database, error) {
+func path() (string, error) {
 	dir, err := config.DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "database.json"), nil
+}
+
+func LoadDB() (model.Database, error) {
+	p, err := path()
 	if err != nil {
 		return model.Database{}, err
 	}
-	path := filepath.Join(dir, "database.json")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(p)
 	if os.IsNotExist(err) {
 		return model.Database{Packages: map[string]model.InstalledPackage{}}, nil
 	}
@@ -52,11 +59,54 @@ func SaveDB(db model.Database) error {
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmpPath, filepath.Join(dir, "database.json"))
+}
+
+func AddTransaction(tx model.Transaction) error {
+	db, err := LoadDB()
+	if err != nil {
+		return err
+	}
+	db.Transactions = append(db.Transactions, tx)
+	if len(db.Transactions) > 100 {
+		db.Transactions = db.Transactions[len(db.Transactions)-100:]
+	}
+	return SaveDB(db)
+}
+
+func UpdateTransaction(tx model.Transaction) error {
+	db, err := LoadDB()
+	if err != nil {
+		return err
+	}
+	for i := range db.Transactions {
+		if db.Transactions[i].ID == tx.ID {
+			db.Transactions[i] = tx
+			return SaveDB(db)
+		}
+	}
+	return fmt.Errorf("transaction %s not found", tx.ID)
+}
+
+func GetTransaction(id string) (model.Transaction, error) {
+	db, err := LoadDB()
+	if err != nil {
+		return model.Transaction{}, err
+	}
+	for _, tx := range db.Transactions {
+		if tx.ID == id {
+			return tx, nil
+		}
+	}
+	return model.Transaction{}, fmt.Errorf("transaction %s not found", id)
 }
