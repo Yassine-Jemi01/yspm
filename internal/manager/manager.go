@@ -193,7 +193,7 @@ func (m *Manager) runTransaction(action string,requested []string,yes,upgrade,au
 			if err:=m.runScript(sp,"preinstall");err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
 			if err:=m.commitPackage(sp,db,rollback);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
 			if err:=m.runScript(sp,"postinstall");err!=nil{return m.finishFailed(tx,err)}
-			if err:=ApplyServices(m,sp.Pkg);err!=nil{return m.finishFailed(tx,err)}
+			if err:=ApplyServices(m,sp.Pkg);err!=nil{return m.finishFailed(tx,err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{return m.finishFailed(tx,err)}
 			installed:=m.installedFromStage(sp)
 			installed.Explicit=containsName(plan.Requested,sp.Pkg.Name)||installed.Explicit
 			db.Packages[sp.Pkg.Name]=installed
