@@ -30,11 +30,14 @@ type Manager struct {
 type dependencyRequest struct { Name, Op, Version, Arch string }
 type resolvedPlan struct { Packages []model.Package; Requested []string }
 type stagedPackage struct {
-	Pkg      model.Package
-	Archive  string
-	Stage    string
-	Manifest []model.FileEntry
-	Scripts  map[string]string
+	Pkg        model.Package
+	Archive    string
+	Stage      string
+	Manifest   []model.FileEntry
+	Scripts    map[string]string
+	Legacy     bool
+	Command    string
+	InstallDir string
 }
 
 func New(user bool, arch string) *Manager {
@@ -313,13 +316,42 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 			if p.Format=="yspkg"||strings.HasSuffix(strings.ToLower(p.URL),".yspkg"){
 				data,e:=repo.ReadPackageData(archive);if e!=nil{errCh<-e;return};sp.Scripts=data.Scripts
 				sp.Manifest,e=repo.ListPackageFiles(archive);if e!=nil{errCh<-e;return}
-				if err:=repo.ExtractPackage(archive,stage);err!=nil{errCh<-err;return}
+				if err:=repo.ExtractPackage(archive,stage);err!=nil{errCh<-e;return}
 			}else{
-				if err:=repo.ExtractArchive(archive,p.Format,stage);err!=nil{errCh<-err;return}
-				files,e:=repo.FileList(stage);if e!=nil{errCh<-e;return}
-				for _,f:=range files{sp.Manifest=append(sp.Manifest,model.FileEntry{Path:f,Type:"file"})}
+				rawStage:=stage
+				if p.Kind=="appimage"||p.Format=="appimage"{
+					name:=filepath.Base(p.Entry);if name==""||name=="."{name=p.Name+".AppImage"}
+					if err:=copyNode(archive,filepath.Join(rawStage,name));err!=nil{errCh<-err;return}
+				}else{
+					if err:=repo.ExtractArchive(archive,p.Format,rawStage);err!=nil{errCh<-err;return}
+				}
+				entryRel:=""
+				if p.Entry!=""&&! (p.Kind=="appimage"||p.Format=="appimage"){
+					entry,err:=repo.FindEntry(rawStage,p.Entry);if err!=nil{errCh<-fmt.Errorf("locate executable for %s: %w",p.Name,err);return}
+					entryRel,_=filepath.Rel(rawStage,entry)
+				}else if p.Kind=="appimage"||p.Format=="appimage"{entryRel=filepath.Base(p.Entry);if entryRel==""||entryRel=="."{entryRel=p.Name+".AppImage"}}
+				rootTree:=filepath.Join(rawStage,"root")
+				if err:=os.MkdirAll(filepath.Join(rootTree,"opt","yspm","packages",p.Name,p.Version),0o755);err!=nil{errCh<-err;return}
+				optDir:=filepath.Join(rootTree,"opt","yspm","packages",p.Name,p.Version)
+				entries,e:=os.ReadDir(rawStage);if e!=nil{errCh<-e;return}
+				for _,en:=range entries{if en.Name()=="root"{continue};if err:=os.Rename(filepath.Join(rawStage,en.Name()),filepath.Join(optDir,en.Name()));err!=nil{errCh<-err;return}}
+				command:=p.Command;if command==""{command=p.Name}
+				if entryRel!=""{
+					link:=filepath.Join(rootTree,"usr","local","bin",command);if err:=os.MkdirAll(filepath.Dir(link),0o755);err!=nil{errCh<-err;return}
+					target:=filepath.ToSlash("/opt/yspm/packages/"+p.Name+"/"+p.Version+"/"+entryRel);if err:=os.Symlink(target,link);err!=nil{errCh<-err;return}
+				}
+				if p.Desktop||p.Kind=="app"||p.Kind=="appimage"{
+					desktopDir:=filepath.Join(rootTree,"usr","share","applications");if err:=os.MkdirAll(desktopDir,0o755);err!=nil{errCh<-err;return}
+					dname:=p.DesktopName;if dname==""{dname=p.Name}
+					cats:=strings.Join(p.Categories,";");if cats==""{cats="Utility;"}
+					desktop:=fmt.Sprintf("[Desktop Entry]\\nType=Application\\nName=%s\\nComment=%s\\nExec=%s %%U\\nTerminal=false\\nCategories=%s\\n",escapeDesktopText(dname),escapeDesktopText(p.Description),command,cats)
+					if err:=os.WriteFile(filepath.Join(desktopDir,p.Name+".desktop"),[]byte(desktop),0o644);err!=nil{errCh<-err;return}
+				}
+				stage=rootTree
+				sp.Legacy=true;sp.Command=command;sp.InstallDir=filepath.Join(m.Paths.Root,"opt","yspm","packages",p.Name,p.Version)
 			}
 		}
+		sp.Manifest,err=repo.Manifest(sp.Stage);if err!=nil{errCh<-err;return}
 		results[i]=sp
 	}()}
 	wg.Wait();close(errCh);for e:=range errCh{cleanupStaged(results);return nil,e};return results,nil
@@ -380,7 +412,7 @@ func copyNode(src,dst string)error{
 func (m *Manager) installedFromStage(sp stagedPackage)model.InstalledPackage{
 	hashes:=map[string]string{};configs:=map[string]string{};files:=[]string{}
 	for _,e:=range sp.Manifest{if e.Type!="dir"{files=append(files,e.Path);if e.Type=="file"{hashes[e.Path]=e.SHA256;if isConfig(sp.Pkg,e.Path){configs[e.Path]=e.SHA256}}}}
-	return model.InstalledPackage{Name:sp.Pkg.Name,Version:sp.Pkg.Version,Revision:sp.Pkg.Revision,Kind:sp.Pkg.Kind,Architecture:sp.Pkg.Architecture,ABI:sp.Pkg.ABI,Dependencies:append([]model.Dependency(nil),sp.Pkg.Dependencies...),Files:files,Manifest:sp.Manifest,FileHashes:hashes,ConfigHashes:configs,Checksum:sp.Pkg.SHA256,Explicit:false,Services:sp.Pkg.Services,Hooks:copyHooks(sp.Scripts),InstalledAt:time.Now()}
+	return model.InstalledPackage{Name:sp.Pkg.Name,Version:sp.Pkg.Version,Revision:sp.Pkg.Revision,Kind:sp.Pkg.Kind,Architecture:sp.Pkg.Architecture,ABI:sp.Pkg.ABI,Dependencies:append([]model.Dependency(nil),sp.Pkg.Dependencies...),InstallDir:sp.InstallDir,Command:sp.Command,Files:files,Manifest:sp.Manifest,FileHashes:hashes,ConfigHashes:configs,Checksum:sp.Pkg.SHA256,Explicit:false,Services:sp.Pkg.Services,Hooks:copyHooks(sp.Scripts),InstalledAt:time.Now()}
 }
 
 func isConfig(p model.Package,path string)bool{for _,x:=range p.ConfigFiles{if filepath.ToSlash(x)==filepath.ToSlash(path){return true}};return false}
@@ -538,3 +570,5 @@ func valueOr(a,b string)string{if a==""{return b};return a}
 func firstNonEmpty(a,b string)string{if a!=""{return a};return b}
 func boolText(v bool)string{if v{return"1"};return"0"}
 func newID()string{return fmt.Sprintf("%x",time.Now().UnixNano())}
+
+func escapeDesktopText(s string) string { s=strings.ReplaceAll(s,"\\","\\\\"); return strings.ReplaceAll(strings.ReplaceAll(s,"\n"," "),";","\\;") }
