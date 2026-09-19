@@ -307,8 +307,7 @@ func scanELFRequirements(root string) ([]string, []string) {
 		if err != nil { return nil }
 		out, err := exec.Command(readelf, "-d", path).Output()
 		if err != nil { return nil }
-		for _, line := range strings.Split(string(out), "
-") {
+		for _, line := range strings.Split(string(out), "\n") {
 			if i := strings.Index(line, "NEEDED"); i >= 0 {
 				if j := strings.Index(line[i:], "["); j >= 0 {
 					v := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(line[i+j:]), "["), "]")
