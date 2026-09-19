@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -10,276 +11,203 @@ import (
 )
 
 func usage() {
-	fmt.Print(`yspm - a small Linux package manager written in Go
+	fmt.Print(`yspm - a Linux system package manager written in Go
 
 Usage:
   yspm <command> [options] [arguments]
 
 Commands:
-  install <pkg>...        Install packages and resolve dependencies
-  remove <pkg>...        Remove packages safely
-  autoremove             Remove unneeded auto-installed dependencies
-  search <query>         Search the repository
-  info <pkg>              Show package information
-  list                   List installed packages
-  depends <pkg>           Show the dependency tree
-  why <pkg>               Show why an installed package is needed
-  explain <pkg>           Explain dependency metadata and resolution
-  update                 Refresh the pinned stable repository index
-  upgrade                Upgrade packages within the current release
-  clean                  Remove cached package archives
-  check                  Check local package database consistency
-  history                Show transaction history
-  transaction <id>       Show a transaction status
-  release                Show the pinned stable release
+  install <pkg>...           Install packages and dependencies
+  remove <pkg>...            Remove packages safely
+  autoremove                 Remove unneeded auto-installed dependencies
+  search <query>             Search the repository
+  info <pkg>                 Show package information
+  list                       List installed packages
+  depends <pkg>              Show the dependency tree
+  why <pkg>                  Show why an installed package is needed
+  explain <pkg>              Explain package ABI/dependency metadata
+  update                     Refresh the pinned repository index
+  upgrade                    Upgrade packages within the current release
+  release                    Show the pinned stable release
+  release upgrade <release>  Upgrade to another stable release
+  clean                      Remove cached package archives
+  check                      Check local package database consistency
+  audit                      Check installed packages against vulnerability metadata
+  history                    Show transaction history
+  transaction <id>           Show transaction status
+  snapshot create            Create a read-only Btrfs system snapshot
+  snapshot list              List system snapshots
+  snapshot restore <id>      Restore a snapshot in a prepared/unmounted target
+  build                      Build a native .yspkg package
+  repo index                 Build repository index from .yspkg files
+  repo sign                  Sign a repository index
+  keygen                    Generate an Ed25519 repository keypair
 
 Options:
-  -y, --yes              Do not ask for confirmation
-  --background           Run the transaction in the background
-  list --upgradable       List only packages with available upgrades
-  list --explicit         List explicitly installed packages
+  -y, --yes                  Do not ask for confirmation
+  --user                     Install/manage packages in the user's home
+  --arch <arch>              Target architecture (e.g. x86_64, aarch64)
+  --snapshot                 Create a Btrfs snapshot before mutating the system
+  --background               Run a transaction in the background
 
 Environment:
-  YSPM_REPOSITORY             Repository index URL/path
-  YSPM_DATA_DIR               Package database/state directory
-  YSPM_CACHE_DIR              Package cache directory
-  YSPM_BIN_DIR                Executable directory
-  YSPM_APPLICATIONS_DIR       Desktop entry directory
-  YSPM_REQUIRE_SIGNATURES=1   Require Ed25519 repository signature verification
-  YSPM_REPOSITORY_SIGNATURE   Detached repository signature URL/path
-  YSPM_REPOSITORY_PUBLIC_KEY  Ed25519 public key (hex/base64)
-
-Examples:
-  yspm update
-  yspm search browser
-  yspm info firefox
-  yspm install firefox git curl
-  yspm install firefox --background
-  yspm remove firefox -y
-  yspm depends devkit
-  yspm why ripgrep
-  yspm list --upgradable
-  yspm transaction 9c1a2b3c4d5e
+  YSPM_ROOT                         Alternate system root for chroot/test environments
+  YSPM_REPOSITORY                   Repository index URL/path
+  YSPM_RELEASE_REPOSITORY_TEMPLATE  Release URL template, e.g. .../{release}/index.json
+  YSPM_DATA_DIR / CACHE_DIR         Optional legacy overrides for tools using the old layout
+  YSPM_REQUIRE_SIGNATURES=1         Require Ed25519 repository index signatures
+  YSPM_REPOSITORY_SIGNATURE         Detached repository signature URL/path
+  YSPM_REPOSITORY_PUBLIC_KEY        Ed25519 public key (hex/base64)
+  YSPM_FOREIGN_ARCHS                Comma-separated foreign architectures
+  YSPM_SNAPSHOT_ROOT                Snapshot source
+  YSPM_SNAPSHOT_DIR                 Snapshot storage directory
 `)
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		usage()
-		return
-	}
-	mgr := manager.New()
+	if len(os.Args) < 2 { usage(); return }
+	user := has(os.Args[2:], "--user")
+	arch := valueAfter(os.Args[2:], "--arch")
+	if arch == "" { arch = os.Getenv("YSPM_ARCH") }
+	if os.Getenv("YSPM_USER") == "1" { user = true }
+	m := manager.New(user, arch)
+
 	cmd := os.Args[1]
-	args := os.Args[2:]
+	args := strip(os.Args[2:], "--user", "--snapshot")
 	if cmd == "__worker" {
-		if len(args) < 3 {
-			fatal("invalid worker arguments")
-		}
-		action, id := args[0], args[1]
-		packed := ""
-		if args[2] == "--" && len(args) > 3 {
-			packed = args[3]
-		}
-		if err := mgr.Worker(action, id, packed); err != nil {
-			fatal(err.Error())
-		}
+		if len(args) < 3 { fatal("invalid worker arguments") }
+		action,id := args[0],args[1]
+		packed:=""
+		if args[2]=="--"&&len(args)>3{packed=args[3]}
+		if err:=m.Worker(action,id,packed,true,has(os.Args[2:],"--snapshot"));err!=nil{fatal(err.Error())}
 		return
 	}
-	yes, background, rest := parseFlags(args)
-	if background && (cmd == "install" || cmd == "remove" || cmd == "upgrade" || cmd == "autoremove") {
-		if err := mgr.RunBackground(cmd, rest); err != nil {
-			fatal(err.Error())
-		}
+
+	yes := has(os.Args[2:], "-y") || has(os.Args[2:], "--yes")
+	background := has(os.Args[2:], "--background")
+	autoSnapshot := has(os.Args[2:], "--snapshot")
+	if background && (cmd=="install"||cmd=="remove"||cmd=="upgrade"||cmd=="autoremove") {
+		if err:=m.RunBackground(cmd,strip(args,"-y","--yes","--background"),yes,autoSnapshot);err!=nil{fatal(err.Error())}
 		return
 	}
+
 	switch cmd {
 	case "install":
-		if len(rest) == 0 {
-			fatal("install requires at least one package name")
-		}
-		if err := mgr.InstallMany(rest, yes); err != nil {
-			fatal(err.Error())
-		}
+		if len(args)==0{fatal("install requires at least one package")}
+		if err:=m.InstallMany(args,yes,autoSnapshot);err!=nil{fatal(err.Error())}
 	case "remove":
-		if len(rest) == 0 {
-			fatal("remove requires at least one package name")
-		}
-		if err := mgr.RemoveMany(rest, yes); err != nil {
-			fatal(err.Error())
-		}
+		if len(args)==0{fatal("remove requires at least one package")}
+		if err:=m.RemoveMany(args,yes,autoSnapshot);err!=nil{fatal(err.Error())}
 	case "autoremove":
-		if err := mgr.Autoremove(yes); err != nil {
-			fatal(err.Error())
-		}
+		if err:=m.Autoremove(yes,autoSnapshot);err!=nil{fatal(err.Error())}
 	case "search":
-		if len(rest) != 1 {
-			fatal("search requires one query")
-		}
-		results, err := mgr.Search(rest[0])
-		if err != nil {
-			fatal(err.Error())
-		}
-		if len(results) == 0 {
-			fmt.Println("No packages found.")
-			return
-		}
-		for _, p := range results {
-			fmt.Printf("%-16s %-10s %s\n", p.Name, p.Version, p.Description)
-		}
+		if len(args)!=1{fatal("search requires one query")}
+		ps,err:=m.Search(args[0]);if err!=nil{fatal(err.Error())}
+		for _,p:=range ps{fmt.Printf("%-20s %-12s %s\n",p.Name,p.Version,p.Description)}
 	case "info":
-		if len(rest) != 1 {
-			fatal("info requires one package name")
-		}
-		p, err := mgr.Info(rest[0])
-		if err != nil {
-			fatal(err.Error())
-		}
-		printInfo(p)
+		if len(args)!=1{fatal("info requires one package")}
+		p,err:=m.Info(args[0]);if err!=nil{fatal(err.Error())};printInfo(p)
 	case "list":
-		upgradable := contains(rest, "--upgradable")
-		explicit := contains(rest, "--explicit")
-		packages, err := mgr.List(upgradable, explicit)
-		if err != nil {
-			fatal(err.Error())
-		}
-		if len(packages) == 0 {
-			fmt.Println("No matching packages installed.")
-			return
-		}
-		for _, p := range packages {
-			marker := ""
-			if p.Explicit {
-				marker = "*"
-			}
-			fmt.Printf("%-16s %-10s %-8s %s\n", p.Name, p.Version, p.Kind, marker)
-		}
+		up,ex:=has(args,"--upgradable"),has(args,"--explicit");ps,err:=m.List(up,ex);if err!=nil{fatal(err.Error())}
+		for _,p:=range ps{mark:="";if p.Explicit{mark="*"};fmt.Printf("%-20s %-12s %-10s %s\n",p.Name,p.Version,p.Kind,mark)}
 	case "depends":
-		if len(rest) != 1 {
-			fatal("depends requires one package name")
-		}
-		if err := mgr.Depends(rest[0]); err != nil {
-			fatal(err.Error())
-		}
+		if len(args)!=1{fatal("depends requires one package")};if err:=m.Depends(args[0]);err!=nil{fatal(err.Error())}
 	case "why":
-		if len(rest) != 1 {
-			fatal("why requires one package name")
-		}
-		if err := mgr.Why(rest[0]); err != nil {
-			fatal(err.Error())
-		}
+		if len(args)!=1{fatal("why requires one package")};if err:=m.Why(args[0]);err!=nil{fatal(err.Error())}
 	case "explain":
-		if len(rest) != 1 {
-			fatal("explain requires one package name")
-		}
-		if err := mgr.Explain(rest[0]); err != nil {
-			fatal(err.Error())
-		}
+		if len(args)!=1{fatal("explain requires one package")};if err:=m.Explain(args[0]);err!=nil{fatal(err.Error())}
 	case "update":
-		if err := mgr.Update(); err != nil {
-			fatal(err.Error())
-		}
+		if err:=m.Update();err!=nil{fatal(err.Error())}
 	case "upgrade":
-		if err := mgr.Upgrade(yes); err != nil {
-			fatal(err.Error())
-		}
-	case "clean":
-		if err := mgr.Clean(); err != nil {
-			fatal(err.Error())
-		}
-	case "check":
-		if err := mgr.Check(); err != nil {
-			fatal(err.Error())
-		}
-	case "history":
-		if err := mgr.History(); err != nil {
-			fatal(err.Error())
-		}
+		if err:=m.Upgrade(yes,autoSnapshot);err!=nil{fatal(err.Error())}
 	case "release":
-		if err := mgr.Release(); err != nil {
-			fatal(err.Error())
-		}
+		if len(args)==0{if err:=m.Release();err!=nil{fatal(err.Error())};return}
+		if len(args)==2&&args[0]=="upgrade"{if err:=m.UpgradeRelease(args[1],yes,autoSnapshot);err!=nil{fatal(err.Error())};return}
+		fatal("usage: yspm release [upgrade <release>]")
+	case "clean":
+		if err:=m.Clean();err!=nil{fatal(err.Error())}
+	case "check":
+		if err:=m.Check();err!=nil{fatal(err.Error())}
+	case "audit":
+		if err:=m.Audit();err!=nil{fatal(err.Error())}
+	case "history":
+		if err:=m.History();err!=nil{fatal(err.Error())}
 	case "transaction":
-		if len(rest) != 1 {
-			fatal("transaction requires an ID")
-		}
-		if err := mgr.Transaction(rest[0]); err != nil {
-			fatal(err.Error())
-		}
-	case "help", "--help", "-h":
+		if len(args)!=1{fatal("transaction requires an ID")};if err:=m.Transaction(args[0]);err!=nil{fatal(err.Error())}
+	case "snapshot":
+		if err:=snapshotCommand(m,args);err!=nil{fatal(err.Error())}
+	case "build":
+		if err:=buildCommand(m,args);err!=nil{fatal(err.Error())}
+	case "repo":
+		if err:=repoCommand(m,args);err!=nil{fatal(err.Error())}
+	case "keygen":
+		if len(args)!=2{fatal("usage: yspm keygen <public-key> <private-key>")};if err:=m.GenerateKey(args[0],args[1]);err!=nil{fatal(err.Error())}
+	case "help","--help","-h":
 		usage()
 	default:
-		usage()
-		fatal(fmt.Sprintf("unknown command %q", cmd))
+		usage();fatal(fmt.Sprintf("unknown command %q",cmd))
 	}
 }
 
-func parseFlags(args []string) (bool, bool, []string) {
-	yes, background := false, false
-	var rest []string
-	for _, a := range args {
-		switch a {
-		case "-y", "--yes":
-			yes = true
-		case "--background":
-			background = true
-		default:
-			rest = append(rest, a)
-		}
-	}
-	return yes, background, rest
+func buildCommand(m *manager.Manager,args []string)error{
+	fs:=flag.NewFlagSet("build",flag.ContinueOnError)
+	root:=fs.String("root","","directory containing the package filesystem tree")
+	out:=fs.String("output","","output .yspkg path")
+	name:=fs.String("name","","package name")
+	version:=fs.String("version","","package version")
+	desc:=fs.String("description","","package description")
+	abi:=fs.String("abi","","distribution ABI identifier")
+	arch:=fs.String("arch","","target architecture")
+	license:=fs.String("license","unknown","package license")
+	maintainer:=fs.String("maintainer","","package maintainer")
+	scripts:=fs.String("scripts","","directory containing pre/post install/remove scripts")
+	if err:=fs.Parse(args);err!=nil{return err}
+	if *root==""||*out==""||*name==""||*version==""{return fmt.Errorf("--root, --output, --name and --version are required")}
+	p,err:=m.Build(*root,*out,*name,*version,*desc,*abi,*arch,*license,*maintainer,*scripts)
+	if err!=nil{return err}
+	fmt.Printf("Built %s %s -> %s\n",p.Name,p.Version,*out);return nil
 }
-func contains(xs []string, want string) bool {
-	for _, x := range xs {
-		if x == want {
-			return true
-		}
-	}
-	return false
-}
-func printInfo(pkg model.Package) {
-	fmt.Printf("Name:         %s\nVersion:      %s\nRevision:     %d\nDescription:  %s\nKind:         %s\nOS/Arch:      %s/%s\nLicense:      %s\n", pkg.Name, pkg.Version, pkg.Revision, pkg.Description, pkg.Kind, pkg.OS, pkg.Architecture, pkg.License)
-	if pkg.Size > 0 {
-		fmt.Printf("Size:         %d bytes\n", pkg.Size)
-	} else {
-		fmt.Println("Size:         unknown")
-	}
-	if pkg.SHA256 == "" {
-		fmt.Println("SHA256:       not provided")
-	} else {
-		fmt.Printf("SHA256:       %s\n", pkg.SHA256)
-	}
-	if len(pkg.Dependencies) == 0 {
-		fmt.Println("Dependencies: none")
-	} else {
-		fmt.Printf("Dependencies: %s\n", joinDeps(pkg.Dependencies))
-	}
-	if len(pkg.Recommends) > 0 {
-		fmt.Printf("Recommends:   %s\n", joinDeps(pkg.Recommends))
-	}
-	if len(pkg.Suggests) > 0 {
-		fmt.Printf("Suggests:     %s\n", joinDeps(pkg.Suggests))
-	}
-	if len(pkg.Conflicts) > 0 {
-		fmt.Printf("Conflicts:    %s\n", strings.Join(pkg.Conflicts, ", "))
-	}
-	if len(pkg.Provides) > 0 {
-		fmt.Printf("Provides:     %s\n", strings.Join(pkg.Provides, ", "))
-	}
-	if len(pkg.Replaces) > 0 {
-		fmt.Printf("Replaces:     %s\n", strings.Join(pkg.Replaces, ", "))
-	}
-	if pkg.Homepage != "" {
-		fmt.Printf("Homepage:     %s\n", pkg.Homepage)
-	}
-	if pkg.URL != "" {
-		fmt.Printf("URL:          %s\n", pkg.URL)
+
+func repoCommand(m *manager.Manager,args []string)error{
+	if len(args)==0{return fmt.Errorf("usage: yspm repo index|sign ...")}
+	switch args[0]{
+	case "index":
+		fs:=flag.NewFlagSet("repo index",flag.ContinueOnError)
+		dir:=fs.String("dir","","directory containing .yspkg files")
+		out:=fs.String("output","index.json","output index")
+		base:=fs.String("base-url","","package base URL")
+		rel:=fs.String("release","1","stable release number")
+		abi:=fs.String("abi","yspm-abi-1","distribution ABI")
+		if err:=fs.Parse(args[1:]);err!=nil{return err}
+		if *dir==""||*base==""{return fmt.Errorf("--dir and --base-url are required")}
+		return m.RepoIndex(*dir,*out,*base,*rel,*abi)
+	case "sign":
+		if len(args)!=4{return fmt.Errorf("usage: yspm repo sign <index.json> <private-key> <signature>")}
+		return m.RepoSign(args[1],args[2],args[3])
+	default:return fmt.Errorf("unknown repo command %q",args[0])
 	}
 }
-func joinDeps(d []model.Dependency) string {
-	out := make([]string, len(d))
-	for i, x := range d {
-		out[i] = string(x)
-	}
-	return strings.Join(out, ", ")
+
+func snapshotCommand(m *manager.Manager,args []string)error{
+	if len(args)==0{return fmt.Errorf("usage: yspm snapshot create|list|restore <id>")}
+	switch args[0]{case "create":_,err:=manager.CreateSnapshot(m);return err
+	case "list":return manager.ListSnapshots(m)
+	case "restore":if len(args)!=2{return fmt.Errorf("snapshot restore requires an ID")};return manager.RestoreSnapshot(m,args[1])
+	default:return fmt.Errorf("unknown snapshot command %q",args[0])}
 }
-func fatal(message string) { fmt.Fprintf(os.Stderr, "yspm: %s\n", message); os.Exit(1) }
+
+func printInfo(p model.Package){
+	fmt.Printf("Name:         %s\nVersion:      %s\nRevision:     %d\nDescription:  %s\nKind:         %s\nOS/Arch:      %s/%s\nABI:          %s\nLicense:      %s\n",p.Name,p.Version,p.Revision,p.Description,p.Kind,p.OS,p.Architecture,value(p.ABI),p.License)
+	fmt.Printf("URL:          %s\nSHA256:       %s\n",p.URL,value(p.SHA256))
+	fmt.Printf("Dependencies: ");if len(p.Dependencies)==0{fmt.Println("none")}else{d:=make([]string,len(p.Dependencies));for i,x:=range p.Dependencies{d[i]=string(x)};fmt.Println(strings.Join(d,", "))}
+	if len(p.SharedRequires)>0{fmt.Printf("Shared requires: %s\n",strings.Join(p.SharedRequires,", "))}
+	if len(p.SharedProvides)>0{fmt.Printf("Shared provides: %s\n",strings.Join(p.SharedProvides,", "))}
+	if len(p.ConfigFiles)>0{fmt.Printf("Config files: %s\n",strings.Join(p.ConfigFiles,", "))}
+	if len(p.Services)>0{fmt.Printf("Services: ");for i,s:=range p.Services{if i>0{fmt.Print(", ")};fmt.Print(s.Name)};fmt.Println()}
+}
+
+func has(xs []string,want string)bool{for _,x:=range xs{if x==want{return true}};return false}
+func valueAfter(xs []string,want string)string{for i,x:=range xs{if x==want&&i+1<len(xs){return xs[i+1]};if strings.HasPrefix(x,want+"="){return strings.TrimPrefix(x,want+"=")}};return ""}
+func strip(xs []string,wants ...string)[]string{out:=[]string{};skip:=false;set:=map[string]bool{};for _,w:=range wants{set[w]=true};for i,x:=range xs{if skip{skip=false;continue};if set[x]{if x=="--arch"{skip=true};continue};if strings.HasPrefix(x,"--arch="){continue};out=append(out,x)};return out}
+func value(s string)string{if s==""{return "none"};return s}
+func fatal(message string){fmt.Fprintf(os.Stderr,"yspm: %s\n",message);os.Exit(1)}
