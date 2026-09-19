@@ -59,6 +59,7 @@ type Package struct {
 	ConfigFiles       []string          `json:"config_files,omitempty"`
 	Services          []Service         `json:"services,omitempty"`
 	Vulnerabilities   []Vulnerability   `json:"vulnerabilities,omitempty"`
+	Triggers          []string          `json:"triggers,omitempty"`
 	Files             []FileEntry       `json:"files,omitempty"`
 	BuildDependencies []Dependency      `json:"build_dependencies,omitempty"`
 }
