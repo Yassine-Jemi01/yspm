@@ -94,7 +94,11 @@ func main() {
 	switch cmd {
 	case "install":
 		if len(args)==0{fatal("install requires at least one package")}
-		if err:=m.InstallMany(args,yes,autoSnapshot);err!=nil{fatal(err.Error())}
+		local:=false
+		for _,a:=range args{if strings.HasSuffix(strings.ToLower(a),".yspkg"){local=true;break}}
+		if local {
+			if err:=m.InstallLocal(args,yes,autoSnapshot);err!=nil{fatal(err.Error())}
+		} else if err:=m.InstallMany(args,yes,autoSnapshot);err!=nil{fatal(err.Error())}
 	case "remove":
 		if len(args)==0{fatal("remove requires at least one package")}
 		if err:=m.RemoveMany(args,yes,autoSnapshot);err!=nil{fatal(err.Error())}
