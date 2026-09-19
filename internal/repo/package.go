@@ -407,3 +407,5 @@ func ParseSize(s string) int64 {
 	v, _ := strconv.ParseFloat(strings.TrimSpace(s),64)
 	return int64(v*float64(mult))
 }
+
+func Manifest(root string) ([]model.FileEntry, error) { return filesystemManifest(root) }
