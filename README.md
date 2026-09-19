@@ -4,7 +4,7 @@
 
 # yspm
 
-**A small Linux package manager written in Go.**
+**A Linux system package manager written in Go.**
 
 [![Release](https://img.shields.io/github/v/release/Yassine-Jemi01/yspm?display_name=release&sort=semver)](https://github.com/Yassine-Jemi01/yspm/releases)
 [![License](https://img.shields.io/github/license/Yassine-Jemi01/yspm)](https://github.com/Yassine-Jemi01/yspm/blob/main/LICENSE)
@@ -15,157 +15,13 @@
 
 ---
 
-A small Linux package manager written in Go.
+yspm is designed for stable-release Linux distributions. The development branch adds native system packages, ABI-aware dependency resolution, shared-library metadata, lifecycle hooks, configuration handling, service integration, repository generation and signing, release upgrades, vulnerability metadata, multi-architecture selection, and optional Btrfs snapshots.
 
-`yspm` is designed around a stable-release repository model rather than a rolling-release model. The package manager resolves dependencies before changing the installed state, downloads packages concurrently, verifies checksums, stages changes, and commits them as a transaction.
+## Status
 
-## What is implemented
+The main branch contains the latest stable release.
 
-- Multi-package transactions: `yspm install firefox brave git`
-- Dependency resolution with version constraints: `foo>=1.2`, `foo=1.2`, `foo<2.0`
-- Alternative dependencies: `foo|bar`
-- Dependency inspection: `depends`, `why`, `explain`
-- Package relationships: `conflicts`, `provides`, `replaces`, `recommends`, `suggests`
-- Explicit vs automatically installed packages
-- `autoremove` for orphaned automatic dependencies
-- Parallel downloads with a bounded worker pool
-- SHA-256 verification and cache re-validation
-- Atomic staging and rollback when a transaction fails
-- File ownership tracking and conflict detection
-- Executable symlink creation in `~/.local/bin`
-- Desktop entry generation for GUI/AppImage packages
-- Transaction lock to prevent concurrent database changes
-- Background transactions with IDs, logs, `history`, and `transaction <id>`
-- Upgrade detection and stable-release pinning
-- Automatic refresh of repository metadata before `upgrade`
-- Local consistency checks with `check`
-- Cache cleanup with `clean`
-- Optional detached Ed25519 repository signature verification
-
-## Commands
-
-```text
-yspm install <package>...          Install packages and dependencies
-yspm remove <package>...          Remove packages safely
-yspm autoremove                    Remove unneeded auto-installed dependencies
-yspm search <query>                Search the repository
-yspm info <package>               Show package information
-yspm list                           List installed packages
-yspm list --upgradable             Show packages with available upgrades
-yspm list --explicit               Show explicitly installed packages
-yspm depends <package>             Show the dependency tree
-yspm why <package>                Show why an installed package is needed
-yspm explain <package>             Explain dependency metadata and resolution
-yspm update                        Refresh the pinned repository index
-yspm upgrade                       Upgrade within the current stable release
-yspm clean                         Remove cached package archives
-yspm check                         Check local package database consistency
-yspm history                       Show transaction history
-yspm transaction <id>              Show transaction status
-yspm release                       Show the pinned stable release
-```
-
-Long-running operations can run in the background:
-
-```bash
-yspm install firefox vscode --background
-yspm upgrade --background
-yspm transaction <id>
-```
-
-## Transaction model
-
-`yspm` follows this order for install/upgrade operations:
-
-```text
-resolve dependencies
-        ↓
-download packages in parallel
-        ↓
-verify SHA-256 checksums
-        ↓
-extract into staging
-        ↓
-validate package/file conflicts
-        ↓
-commit the transaction
-        ↓
-write the package database
-```
-
-The transaction lock prevents concurrent writes to the package state. A failed commit restores files that were changed during the transaction.
-
-## Stable releases
-
-A repository is pinned to a numbered release:
-
-```text
-repo/
-└── releases/
-    └── 1/
-        └── index.json
-```
-
-A future release can exist beside it:
-
-```text
-repo/
-└── releases/
-    ├── 1/
-    │   └── index.json
-    └── 2/
-        └── index.json
-```
-
-An installed release never silently becomes another release. `upgrade` only considers newer package versions inside the current release.
-
-## Package metadata
-
-The repository index supports fields for:
-
-- name, version, revision
-- release, OS, architecture
-- dependencies and version constraints
-- recommends and suggests
-- conflicts, provides, replaces
-- checksum, size, URL
-- package kind and archive format
-- executable entry and command name
-- GUI desktop metadata
-- license, maintainer, homepage
-
-For non-`meta` packages, a valid 64-character SHA-256 is required before installation.
-
-## Package types
-
-- `binary` — command-line software distributed as an archive
-- `app` — GUI applications distributed as an archive
-- `appimage` — single-file AppImage applications
-- `meta` — dependency-only packages
-- `system` — reserved for future native distro packages installed into the filesystem root
-
-The current official repository is still focused on upstream application/archive packages. A real distro base will eventually need native system packages built against the distro's own stable ABI so shared libraries can be reused instead of bundled privately.
-
-## Paths
-
-Default user installation paths:
-
-```text
-~/.cache/yspm/
-~/.local/share/yspm/
-~/.local/bin/
-~/.local/share/applications/
-```
-
-The following environment variables make isolated testing possible:
-
-```text
-YSPM_REPOSITORY
-YSPM_DATA_DIR
-YSPM_CACHE_DIR
-YSPM_BIN_DIR
-YSPM_APPLICATIONS_DIR
-```
+The system-package-manager branch contains the next development milestone and is not presented as a stable distro replacement yet.
 
 ## Requirements
 
@@ -174,63 +30,294 @@ YSPM_APPLICATIONS_DIR
 
 Install Go using the [official installation instructions](https://go.dev/doc/install).
 
-On Debian/Ubuntu systems, you can also install Go from the distribution repositories:
+On Debian/Ubuntu:
 
-```bash
+~~~bash
 sudo apt update
 sudo apt install golang-go
-```
+~~~
 
-The distribution package may provide a different Go version than the one currently required by this project, so check with:
+Check the installed version:
 
-```bash
+~~~bash
 go version
-```
+~~~
 
-## Build and test
+## Install and use
 
-```bash
-go test ./...
-go build -o yspm ./cmd/yspm
-./yspm --help
-```
+System mode is the default and state-changing operations require root:
 
-For isolated repository testing, point `YSPM_REPOSITORY` to a local `index.json` and use a temporary `HOME` or dedicated `YSPM_*_DIR` paths.
+~~~bash
+sudo yspm update
+sudo yspm install gcc firefox
+sudo yspm upgrade
+sudo yspm remove gcc
+~~~
 
-## Repository security
+Per-user mode is explicit:
 
-SHA-256 protects against corrupted or unexpectedly changed package files, but a checksum alone does not authenticate the repository owner. `yspm` therefore also supports optional detached Ed25519 signature verification for the repository index through:
+~~~bash
+yspm install ripgrep --user
+~~~
 
-```text
+A native package can be installed directly:
+
+~~~bash
+sudo yspm install ./hello-1.0.0-x86_64.yspkg
+~~~
+
+## Commands
+
+~~~text
+yspm install <package>...           Install packages and dependencies
+yspm remove <package>...            Remove packages safely
+yspm autoremove                     Remove unneeded automatic dependencies
+yspm search <query>                 Search the repository
+yspm info <package>                 Show package metadata
+yspm list --upgradable              Show available upgrades
+yspm depends <package>              Show dependency tree
+yspm why <package>                 Explain reverse dependencies
+yspm explain <package>             Explain ABI and dependency metadata
+yspm update                         Refresh repository metadata
+yspm upgrade                        Upgrade within the pinned release
+yspm release                       Show installed release and ABI
+yspm release upgrade <release>     Migrate to another stable release
+yspm audit                           Check vulnerability metadata
+yspm check                           Verify installed files
+yspm clean                           Remove package cache
+yspm history                         Show transaction history
+yspm transaction <id>               Show a transaction
+yspm snapshot create               Create a Btrfs snapshot
+yspm snapshot list                 List snapshots
+yspm snapshot restore <id>         Restore a prepared snapshot target
+yspm build                          Build a native .yspkg package
+yspm repo index                    Generate a repository index
+yspm repo sign                     Sign repository metadata
+yspm keygen                        Generate repository signing keys
+~~~
+
+## Native package format
+
+Native packages use .yspkg.
+
+~~~text
+metadata.json
+scripts/
+  preinstall
+  postinstall
+  preremove
+  postremove
+root/
+  usr/
+  etc/
+  var/
+~~~
+
+The metadata can contain:
+
+- stable release ABI
+- package and shared-library dependencies
+- file manifests and checksums
+- configuration files
+- services
+- triggers
+- replacements and conflicts
+- vulnerability records
+- target OS and architecture
+
+## Dependency and ABI model
+
+yspm resolves normal package dependencies and shared-library requirements before changing installed state.
+
+Native packages can declare shared-library SONAMEs:
+
+~~~text
+shared_requires:
+  - libssl.so.3
+
+shared_provides:
+  - libssl.so.3
+~~~
+
+The build command can discover ELF NEEDED and SONAME entries with readelf.
+
+A repository can pin one ABI identifier. Packages with a mismatched ABI are rejected.
+
+This is intended to reuse shared libraries instead of privately bundling a copy inside every application.
+
+## Transactions
+
+Install and upgrade work as a transaction:
+
+~~~text
+resolve
+  ↓
+download
+  ↓
+verify SHA-256
+  ↓
+stage
+  ↓
+validate ownership/conflicts
+  ↓
+preinstall hook
+  ↓
+commit
+  ↓
+postinstall hook
+  ↓
+services and triggers
+  ↓
+save package database
+~~~
+
+The database tracks ownership, manifests, configuration hashes, ABI, services, hooks, and transaction history.
+
+A failed file commit restores the filesystem changes made by the transaction.
+
+## Hooks, services, and triggers
+
+Native packages can contain preinstall, postinstall, preremove, and postremove scripts.
+
+Hooks receive YSPM_ROOT, YSPM_PACKAGE, and YSPM_VERSION.
+
+Service metadata supports:
+
+- systemd
+- OpenRC
+- runit
+- HardcoreLinux initctl
+
+Package triggers can refresh shared-library caches, the desktop database, fonts, and icon data.
+
+Hooks are trusted package code and should only come from trusted repositories.
+
+## Configuration files
+
+Packages can declare files under config_files.
+
+When a user-modified configuration would be replaced during an upgrade, yspm keeps the current file and writes the distribution copy as:
+
+~~~text
+file.yspm-dist
+~~~
+
+A modified configuration removed with a package can be preserved as:
+
+~~~text
+file.yspm-save
+~~~
+
+## Repositories
+
+Generate an index from native packages:
+
+~~~bash
+yspm repo index \
+  --dir ./packages \
+  --output ./releases/1/index.json \
+  --base-url https://repo.example/yspm/releases/1 \
+  --release 1 \
+  --abi yspm-abi-1
+~~~
+
+Sign the index:
+
+~~~bash
+yspm keygen repo.pub repo.key
+yspm repo sign index.json repo.key index.json.sig
+~~~
+
+Clients can require detached Ed25519 signatures with:
+
+~~~bash
 YSPM_REQUIRE_SIGNATURES=1
-YSPM_REPOSITORY_SIGNATURE=<signature URL or path>
-YSPM_REPOSITORY_PUBLIC_KEY=<hex or base64 Ed25519 public key>
-```
+YSPM_REPOSITORY_SIGNATURE=https://repo.example/index.json.sig
+YSPM_REPOSITORY_PUBLIC_KEY=<public-key>
+~~~
 
-A production distro repository should publish signed metadata and have a key rotation/revocation policy.
+## Stable releases
 
-## References
+The yspm application version is separate from the repository release.
 
-`yspm` is an independent implementation. The project studies package-management concepts from established systems and Go's standard library rather than copying their implementations.
+~~~text
+application: v0.2.x
+repository: 1
+~~~
 
-- Go documentation: https://go.dev/doc/
-- Debian APT documentation: https://www.debian.org/doc/manuals/debian-reference/ch02
-- Debian package dependency documentation: https://www.debian.org/doc/manuals/debian-faq/pkg-basics.en.html
-- Debian dependency-hell notes: https://wiki.debian.org/DependencyHell
-- Fedora Packaging Guidelines: https://docs.fedoraproject.org/en-US/packaging-guidelines/
-- DNF source: https://github.com/rpm-software-management/dnf5
-- Pacman manual: https://man.archlinux.org/man/pacman.8
+Normal upgrade stays inside the current release.
 
-## External imagery
+An explicit migration is:
 
-![Fedora DNF package update](https://fedorabr.org/uploads/editor/0j/mla8q3p1r6hd.jpg)
+~~~bash
+sudo yspm release upgrade 2
+~~~
 
-The terminal image is a real Fedora DNF package-management example, included as contextual imagery rather than a yspm screenshot.
+The target repository must provide stable metadata and a compatible ABI.
 
-- Go logo: [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Go_Logo_Blue.svg)
-- Tux: [Wikimedia Commons — Tux.svg](https://commons.wikimedia.org/wiki/File:Tux.svg)
-- Fedora DNF example: [Fedora Brasil](https://fedorabr.org/discussion/496/tutorial-atualizando-o-fedora-38-e-39-para-o-fedora-40)
+## Multi-architecture
 
+Packages use normalized architecture names such as x86_64, aarch64, i386, and armv7.
+
+Select a target architecture with:
+
+~~~bash
+sudo yspm install package --arch aarch64
+~~~
+
+Foreign architectures can be enabled with YSPM_FOREIGN_ARCHS.
+
+## Security audit
+
+Package metadata can contain vulnerability records:
+
+~~~json
+{
+  "id": "CVE-YYYY-NNNN",
+  "severity": "high",
+  "fixed_version": "2.0.0"
+}
+~~~
+
+Run:
+
+~~~bash
+yspm audit
+~~~
+
+The audit is metadata-driven and does not claim that the repository contains every upstream vulnerability.
+
+## System snapshots
+
+On Btrfs:
+
+~~~bash
+sudo yspm snapshot create
+sudo yspm snapshot list
+~~~
+
+Automatic pre-transaction snapshots can be requested:
+
+~~~bash
+sudo yspm upgrade --snapshot
+~~~
+
+Live root restoration is intentionally refused. Root restoration must be performed from a prepared rescue or unmounted target.
+
+## Compatibility with existing upstream packages
+
+The current stable repository still contains upstream archives such as tarballs, ZIP files, and AppImages.
+
+The development manager keeps a legacy integration path so the existing repository remains usable while native .yspkg packages are introduced.
+
+## Development
+
+~~~bash
+go test ./...
+go build ./cmd/yspm
+~~~
+
+See [Native System Packages](./docs/SYSTEM_PACKAGES.md) for the package and integration contract.
 
 ## License
 
