@@ -32,7 +32,7 @@ func NewPaths(user bool) (Paths, error) {
 		if err != nil { return Paths{}, err }
 		data := filepath.Join(home, ".local", "share", "yspm")
 		return Paths{
-			Root: "/", State: data, Cache: filepath.Join(home, ".cache", "yspm"),
+			Root: home, State: data, Cache: filepath.Join(home, ".cache", "yspm"),
 			Bin: filepath.Join(home, ".local", "bin"),
 			Applications: filepath.Join(home, ".local", "share", "applications"),
 			Staging: filepath.Join(data, "staging"), Database: filepath.Join(data, "database.json"),
