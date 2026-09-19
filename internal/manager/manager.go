@@ -69,15 +69,6 @@ func (m *Manager) Update() error {
 	idx, err := repo.FetchIndex(m.repository)
 	if err != nil { return err }
 	if err := repo.ValidateStableIndex(idx); err != nil { return err }
-	db, err := store.LoadDBFor(m.User)
-	if err != nil { return err }
-	if db.Release != "" && db.Release != idx.Release {
-		return fmt.Errorf("repository release changed from %s to %s; use 'yspm release upgrade %s'", db.Release, idx.Release, idx.Release)
-	}
-	if db.Release == "" {
-		db.Release, db.ABI = idx.Release, idx.ABI
-		if err := store.SaveDBFor(m.User, db); err != nil { return err }
-	}
 	if err := repo.CacheIndex(idx); err != nil { return err }
 	fmt.Printf("Release %s (%s) — %d packages — ABI %s.\n", idx.Release, idx.Channel, len(idx.Packages), valueOr(idx.ABI,"none"))
 	return nil
