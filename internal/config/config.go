@@ -107,3 +107,28 @@ func NormalizeArch(a string) string {
 
 func HostOS() string { return runtime.GOOS }
 func HostArch() string { return NormalizeArch(runtime.GOARCH) }
+
+func CacheDir() (string,error) {
+	user := os.Geteuid() != 0
+	p, err := NewPaths(user)
+	if err != nil { return "", err }
+	return p.Cache, nil
+}
+func DataDir() (string,error) {
+	user := os.Geteuid() != 0
+	p, err := NewPaths(user)
+	if err != nil { return "", err }
+	return p.State, nil
+}
+func BinDir() (string,error) {
+	user := os.Geteuid() != 0
+	p, err := NewPaths(user)
+	if err != nil { return "", err }
+	return p.Bin, nil
+}
+func ApplicationsDir() (string,error) {
+	user := os.Geteuid() != 0
+	p, err := NewPaths(user)
+	if err != nil { return "", err }
+	return p.Applications, nil
+}
