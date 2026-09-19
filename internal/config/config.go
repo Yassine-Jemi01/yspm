@@ -30,21 +30,32 @@ func NewPaths(user bool) (Paths, error) {
 	if user {
 		home, err := homeDir()
 		if err != nil { return Paths{}, err }
-		data := filepath.Join(home, ".local", "share", "yspm")
+		data := os.Getenv("YSPM_DATA_DIR")
+		if data == "" { data = filepath.Join(home, ".local", "share", "yspm") }
+		cache := os.Getenv("YSPM_CACHE_DIR")
+		if cache == "" { cache = filepath.Join(home, ".cache", "yspm") }
+		bin := os.Getenv("YSPM_BIN_DIR")
+		if bin == "" { bin = filepath.Join(home, ".local", "bin") }
+		apps := os.Getenv("YSPM_APPLICATIONS_DIR")
+		if apps == "" { apps = filepath.Join(home, ".local", "share", "applications") }
 		return Paths{
-			Root: home, State: data, Cache: filepath.Join(home, ".cache", "yspm"),
-			Bin: filepath.Join(home, ".local", "bin"),
-			Applications: filepath.Join(home, ".local", "share", "applications"),
+			Root: home, State: data, Cache: cache,
+			Bin: bin,
+			Applications: apps,
 			Staging: filepath.Join(data, "staging"), Database: filepath.Join(data, "database.json"),
 			Transactions: filepath.Join(data, "transactions"), Snapshots: filepath.Join(data, "snapshots"),
 		}, nil
 	}
 	root := strings.TrimSuffix(os.Getenv("YSPM_ROOT"), string(os.PathSeparator))
 	if root == "" { root = "/" }
-	state := filepath.Join(root, "var", "lib", "yspm")
-	cache := filepath.Join(root, "var", "cache", "yspm")
-	bin := filepath.Join(root, "usr", "local", "bin")
-	apps := filepath.Join(root, "usr", "share", "applications")
+	state := os.Getenv("YSPM_DATA_DIR")
+	if state == "" { state = filepath.Join(root, "var", "lib", "yspm") }
+	cache := os.Getenv("YSPM_CACHE_DIR")
+	if cache == "" { cache = filepath.Join(root, "var", "cache", "yspm") }
+	bin := os.Getenv("YSPM_BIN_DIR")
+	if bin == "" { bin = filepath.Join(root, "usr", "local", "bin") }
+	apps := os.Getenv("YSPM_APPLICATIONS_DIR")
+	if apps == "" { apps = filepath.Join(root, "usr", "share", "applications") }
 	return Paths{
 		Root: root, State: state, Cache: cache, Bin: bin, Applications: apps,
 		Staging: filepath.Join(state, "staging"), Database: filepath.Join(state, "database.json"),
