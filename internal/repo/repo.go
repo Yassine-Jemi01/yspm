@@ -63,6 +63,7 @@ func FetchIndex(source string) (model.Index, error) {
 	if idx.Release == "" || idx.Channel == "" {
 		return model.Index{}, errors.New("repository index is missing release/channel")
 	}
+	if err := ValidateStableIndex(idx); err != nil { return model.Index{}, err }
 	if config.RequireRepositorySignature() {
 		if err := verifyIndexSignature(data); err != nil {
 			return model.Index{}, err
