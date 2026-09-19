@@ -381,7 +381,7 @@ func copyNode(src,dst string)error{
 func (m *Manager) installedFromStage(sp stagedPackage)model.InstalledPackage{
 	hashes:=map[string]string{};configs:=map[string]string{};files:=[]string{}
 	for _,e:=range sp.Manifest{if e.Type!="dir"{files=append(files,e.Path);if e.Type=="file"{hashes[e.Path]=e.SHA256;if isConfig(sp.Pkg,e.Path){configs[e.Path]=e.SHA256}}}}
-	return model.InstalledPackage{Name:sp.Pkg.Name,Version:sp.Pkg.Version,Revision:sp.Pkg.Revision,Kind:sp.Pkg.Kind,Architecture:sp.Pkg.Architecture,ABI:sp.Pkg.ABI,Dependencies:append([]model.Dependency(nil),sp.Pkg.Dependencies...),Files:files,Manifest:sp.Manifest,FileHashes:hashes,ConfigHashes:configs,Checksum:sp.Pkg.SHA256,Explicit:false,Services:sp.Pkg.Services,InstalledAt:time.Now()}
+	return model.InstalledPackage{Name:sp.Pkg.Name,Version:sp.Pkg.Version,Revision:sp.Pkg.Revision,Kind:sp.Pkg.Kind,Architecture:sp.Pkg.Architecture,ABI:sp.Pkg.ABI,Dependencies:append([]model.Dependency(nil),sp.Pkg.Dependencies...),Files:files,Manifest:sp.Manifest,FileHashes:hashes,ConfigHashes:configs,Checksum:sp.Pkg.SHA256,Explicit:false,Services:sp.Pkg.Services,Hooks:copyHooks(sp.Scripts),InstalledAt:time.Now()}
 }
 
 func isConfig(p model.Package,path string)bool{for _,x:=range p.ConfigFiles{if filepath.ToSlash(x)==filepath.ToSlash(path){return true}};return false}
@@ -423,8 +423,38 @@ func (m *Manager) RemoveMany(names []string,yes,autoSnapshot bool)error{
 	})
 }
 
-func (m *Manager) runInstalledHook(p model.InstalledPackage,name string)error{return nil}
-func (m *Manager) runInstalledHookByName(name,hook string)error{return nil}
+func (m *Manager) runInstalledHook(p model.InstalledPackage,name string) error {
+	script := strings.TrimSpace(p.Hooks[name])
+	if script == "" { return nil }
+	tmpDir := filepath.Join(m.Paths.State, "hooks")
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil { return err }
+	f, err := os.CreateTemp(tmpDir, "hook-*")
+	if err != nil { return err }
+	path := f.Name()
+	defer os.Remove(path)
+	if _, err := f.WriteString(script); err != nil { _ = f.Close(); return err }
+	if err := f.Chmod(0o700); err != nil { _ = f.Close(); return err }
+	if err := f.Close(); err != nil { return err }
+	cmd := exec.Command("/bin/sh", path)
+	cmd.Env = append(os.Environ(), "YSPM_ROOT="+m.Paths.Root, "YSPM_PACKAGE="+p.Name, "YSPM_VERSION="+p.Version)
+	cmd.Dir = m.Paths.Root
+	out, err := cmd.CombinedOutput()
+	if err != nil { return fmt.Errorf("%s hook for %s failed: %w: %s", name, p.Name, err, strings.TrimSpace(string(out))) }
+	return nil
+}
+func (m *Manager) runInstalledHookByName(name,hook string) error {
+	db, err := store.LoadDBFor(m.User)
+	if err != nil { return err }
+	p, ok := db.Packages[name]
+	if !ok { return nil }
+	return m.runInstalledHook(p, hook)
+}
+func copyHooks(in map[string]string) map[string]string {
+	if len(in)==0 { return nil }
+	out:=make(map[string]string,len(in))
+	for k,v:=range in { out[k]=v }
+	return out
+}
 
 func (m *Manager) Autoremove(yes,autoSnapshot bool)error{
 	for{db,err:=store.LoadDBFor(m.User);if err!=nil{return err};var c []string
