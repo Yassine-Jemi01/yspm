@@ -47,7 +47,7 @@ func (m *Manager) InstallLocal(paths []string, yes, autoSnapshot bool) error {
 			if err:=m.runScript(sp,"preinstall");err!=nil{rb.rollback();return m.finishFailed(tx,err)}
 			if err:=m.commitPackage(sp,db,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
 			if err:=m.runScript(sp,"postinstall");err!=nil{return m.finishFailed(tx,err)}
-			if err:=ApplyServices(m,sp.Pkg);err!=nil{return m.finishFailed(tx,err)}
+			if err:=ApplyServices(m,sp.Pkg);err!=nil{return m.finishFailed(tx,err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{return m.finishFailed(tx,err)}
 			ip:=m.installedFromStage(sp);ip.Explicit=containsName(requested,sp.Pkg.Name);db.Packages[sp.Pkg.Name]=ip
 			for _,old:=range sp.Pkg.Replaces{if _,ok:=db.Packages[old];ok{delete(db.Packages,old)}}
 		}
