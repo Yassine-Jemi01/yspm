@@ -151,9 +151,16 @@ func LoadCachedIndex() (model.Index, error) {
 }
 
 func CurrentSystem() (string, string) { return runtime.GOOS, runtime.GOARCH }
+
+func SupportsArchitecture(p model.Package, requested string) bool {
+	requested = config.NormalizeArch(requested)
+	if p.Architecture == "" { return true }
+	return config.NormalizeArch(p.Architecture) == requested
+}
+
 func SupportsCurrentSystem(p model.Package) bool {
 	osName, arch := CurrentSystem()
-	return (p.OS == "" || p.OS == osName || (osName == "linux" && p.OS == "linux")) && (p.Architecture == "" || p.Architecture == arch || (arch == "amd64" && p.Architecture == "x86_64"))
+	return (p.OS == "" || p.OS == osName || (osName == "linux" && p.OS == "linux")) && SupportsArchitecture(p, arch)
 }
 
 func ValidateInstallPackage(p model.Package) error {
