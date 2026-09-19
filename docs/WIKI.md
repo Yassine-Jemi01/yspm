@@ -1,18 +1,16 @@
 # yspm Wiki
 
-![Go](https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Go_Logo_Blue.svg/1280px-Go_Logo_Blue.svg.png)
+![Go](https://upload.wikimedia.org/wikipedia/commons/0/05/Go_Logo_Blue.svg)
 
-![Tux](https://upload.wikimedia.org/wikipedia/commons/thumb/3/35/Tux.svg/800px-Tux.svg.png)
+![Tux](https://upload.wikimedia.org/wikipedia/commons/3/35/Tux.svg)
 
-## Home
-
-yspm is a small Linux package manager written in Go. The project focuses on dependency-aware installation, safe transactions, package state, and stable repository releases.
-
-### Current release
+## Current release
 
 `v0.2.0`
 
-### Commands
+yspm is a small Linux package manager written in Go, focused on dependency-aware installation, safe transactions, package state, and stable repository releases.
+
+## Commands
 
 ```bash
 yspm update
@@ -24,13 +22,13 @@ yspm upgrade
 yspm remove firefox
 ```
 
-Install several packages as one planned transaction:
+Install multiple packages in one transaction:
 
 ```bash
 yspm install firefox brave git vscode
 ```
 
-Background operations:
+Background transactions:
 
 ```bash
 yspm install firefox vscode --background
@@ -38,25 +36,31 @@ yspm upgrade --background
 yspm transaction <id>
 ```
 
-## Dependency resolution
+## v0.2.0 features
 
-Dependencies are resolved before installed state is changed. The resolver supports version constraints, alternatives, conflicts, provides/replaces, recommends, and suggests.
+- Dependency resolution with version constraints
+- Alternative dependencies
+- Conflicts, provides, and replaces
+- Explicit and automatic package tracking
+- `autoremove`
+- Parallel downloads
+- SHA-256 verification and cache re-validation
+- Staging and transaction rollback
+- File ownership and conflict detection
+- Executable and desktop integration
+- Background transactions with IDs and logs
+- Upgrade detection within the current stable release
+- Transaction history and local consistency checks
+- Optional Ed25519 repository metadata verification
 
-```text
-openssl>=3.0
-foo=1.2
-lib<2.0
-editor|editor-bin
-```
-
-## Transactions
+## Transaction flow
 
 ```text
 resolve
   ↓
 download in parallel
   ↓
-verify SHA-256
+verify
   ↓
 stage
   ↓
@@ -67,11 +71,7 @@ commit
 database
 ```
 
-The package-state lock prevents concurrent database changes. Staging and rollback protect against partial transactions.
-
-## Package database
-
-yspm tracks installed versions, dependencies, install reason, file ownership, checksums, timestamps, application integration, and transaction history.
+The package-state lock prevents concurrent database changes.
 
 ## Stable releases
 
@@ -84,7 +84,7 @@ repo/
         └── index.json
 ```
 
-`upgrade` stays within the active stable repository release. Moving to another release is intended to be explicit.
+`upgrade` remains inside the active stable repository release. Switching to another release is intended to be explicit.
 
 ## Package types
 
@@ -98,18 +98,22 @@ system     reserved for future native distro packages
 
 ## Security
 
-Non-meta packages require SHA-256 checksums. Optional detached Ed25519 signatures can authenticate repository metadata.
+Installable non-meta packages require a valid SHA-256 checksum. Optional detached Ed25519 signatures can authenticate repository metadata.
 
 ## Architecture
 
-See [`docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md) for the component layout, resolver, transaction engine, database, background worker, security model, and native package direction.
+See [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for the resolver, transaction engine, package database, background worker, security model, and native package direction.
 
-## Native package direction
+## References
 
-The current repository is mainly based on upstream archives and AppImages. A future distro layer is intended to use native packages with manifests and shared system-library dependencies.
+- [Go documentation](https://go.dev/doc/)
+- [Debian Reference — Package Management](https://www.debian.org/doc/manuals/debian-reference/ch02)
+- [Debian package basics](https://www.debian.org/doc/manuals/debian-faq/pkg-basics.en.html)
+- [Debian Dependency Hell](https://wiki.debian.org/DependencyHell)
+- [Fedora Packaging Guidelines](https://docs.fedoraproject.org/en-US/packaging-guidelines/)
+- [DNF5](https://github.com/rpm-software-management/dnf5)
 
 ## Image sources
 
 - Go logo: [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Go_Logo_Blue.svg)
 - Tux: [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Tux.svg)
-- Fedora DNF example: [Fedora Brasil](https://fedorabr.org/discussion/496/tutorial-atualizando-o-fedora-38-e-39-para-o-fedora-40)
