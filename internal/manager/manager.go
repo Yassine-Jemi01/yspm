@@ -316,7 +316,7 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 			if p.Format=="yspkg"||strings.HasSuffix(strings.ToLower(p.URL),".yspkg"){
 				data,e:=repo.ReadPackageData(archive);if e!=nil{errCh<-e;return};sp.Scripts=data.Scripts
 				sp.Manifest,e=repo.ListPackageFiles(archive);if e!=nil{errCh<-e;return}
-				if err:=repo.ExtractPackage(archive,stage);err!=nil{errCh<-e;return}
+				if err:=repo.ExtractPackage(archive,stage);err!=nil{errCh<-err;return}
 			}else{
 				rawStage:=stage
 				if p.Kind=="appimage"||p.Format=="appimage"{
