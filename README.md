@@ -1,4 +1,19 @@
+<div align="center">
+
+<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/05/Go_Logo_Blue.svg/1280px-Go_Logo_Blue.svg.png" alt="Go" width="220">
+
 # yspm
+
+**A small Linux package manager written in Go.**
+
+[![Release](https://img.shields.io/github/v/release/Yassine-Jemi01/yspm?display_name=release&sort=semver)](https://github.com/Yassine-Jemi01/yspm/releases)
+[![License](https://img.shields.io/github/license/Yassine-Jemi01/yspm)](https://github.com/Yassine-Jemi01/yspm/blob/main/LICENSE)
+
+<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/3/35/Tux.svg/800px-Tux.svg.png" alt="Tux" width="120">
+
+</div>
+
+---
 
 A small Linux package manager written in Go.
 
@@ -185,6 +200,17 @@ A production distro repository should publish signed metadata and have a key rot
 - Fedora Packaging Guidelines: https://docs.fedoraproject.org/en-US/packaging-guidelines/
 - DNF source: https://github.com/rpm-software-management/dnf5
 - Pacman manual: https://man.archlinux.org/man/pacman.8
+
+## External imagery
+
+![Fedora DNF package update](https://fedorabr.org/uploads/editor/0j/mla8q3p1r6hd.jpg)
+
+The terminal image is a real Fedora DNF package-management example, included as contextual imagery rather than a yspm screenshot.
+
+- Go logo: [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Go_Logo_Blue.svg)
+- Tux: [Wikimedia Commons](https://commons.wikimedia.org/wiki/File:Tux.svg)
+- Fedora DNF example: [Fedora Brasil](https://fedorabr.org/discussion/496/tutorial-atualizando-o-fedora-38-e-39-para-o-fedora-40)
+
 
 ## License
 
