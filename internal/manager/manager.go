@@ -548,7 +548,19 @@ func (m *Manager) RunBackground(action string,args []string,yes,autoSnapshot boo
 	tx:=m.startTransaction(action,args,"");logDir:=m.Paths.Transactions;if err:=os.MkdirAll(logDir,0o755);err!=nil{return err};logFile,err:=os.OpenFile(filepath.Join(logDir,tx.ID+".log"),os.O_CREATE|os.O_WRONLY|os.O_TRUNC,0o644);if err!=nil{return err}
 	cmd:=exec.Command(os.Args[0],"__worker",action,tx.ID,"--",strings.Join(args,"\x00"));cmd.Stdout=logFile;cmd.Stderr=logFile;cmd.Env=os.Environ();cmd.Env=append(cmd.Env,"YSPM_USER="+boolText(m.User),"YSPM_ARCH="+m.arch);if err:=cmd.Start();err!=nil{_ = logFile.Close();return err};_ = logFile.Close();fmt.Printf("Transaction %s started in background.\n",tx.ID);return nil
 }
-func (m *Manager) Worker(action,id,packed string,yes,autoSnapshot bool)error{args:=[]string{};if packed!=""{args=strings.Split(packed,"\x00")};var err error;switch action{case"install":err=m.InstallMany(args,true,autoSnapshot);case"remove":err=m.RemoveMany(args,true,autoSnapshot);case"upgrade":err=m.Upgrade(true,autoSnapshot);default:err=fmt.Errorf("unsupported background action %q",action)};tx,e:=store.GetTransactionFor(m.User,id);if e==nil{if err==nil{tx.Status="success"}else{tx.Status="failed";tx.Error=err.Error()};tx.FinishedAt=time.Now();_=store.UpdateTransactionFor(m.User,tx)};return err}
+func (m *Manager) Worker(action,id,packed string,yes,autoSnapshot bool)error{
+	args:=[]string{};if packed!=""{args=strings.Split(packed,"\x00")};var err error
+	switch action{
+	case "install":
+		local:=false;for _,a:=range args{if strings.HasSuffix(strings.ToLower(a),".yspkg"){local=true;break}}
+		if local{err=m.InstallLocal(args,true,autoSnapshot)}else{err=m.InstallMany(args,true,autoSnapshot)}
+	case "remove":err=m.RemoveMany(args,true,autoSnapshot)
+	case "upgrade":err=m.Upgrade(true,autoSnapshot)
+	default:err=fmt.Errorf("unsupported background action %q",action)
+	}
+	tx,e:=store.GetTransactionFor(m.User,id);if e==nil{if err==nil{tx.Status="success"}else{tx.Status="failed";tx.Error=err.Error()};tx.FinishedAt=time.Now();_=store.UpdateTransactionFor(m.User,tx)}
+	return err
+}
 
 func (m *Manager) runInstalledHookFromArchive(_ model.InstalledPackage,_ string)error{return nil}
 
