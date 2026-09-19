@@ -372,7 +372,7 @@ func (m *Manager) commitPackage(sp stagedPackage,db model.Database,rb *transacti
 		if !within(m.Paths.Root,target){return fmt.Errorf("package path escapes root: %s",e.Path)}
 		if err:=os.MkdirAll(filepath.Dir(target),0o755);err!=nil{return err}
 		if existing,err:=os.Lstat(target);err==nil{
-			if owner,ok:=ownerForPath(db,e.Path);!ok&&!isConfig(sp.Pkg,e.Path){
+			if _,ok:=ownerForPath(db,e.Path);!ok&&!isConfig(sp.Pkg,e.Path){
 				return fmt.Errorf("refusing to overwrite unowned file %s",e.Path)
 			}
 
