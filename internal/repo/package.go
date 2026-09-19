@@ -339,22 +339,29 @@ func withinRoot(root, target string) bool {
 func PackageSHA256(path string) (string, error) { return fileSHA256(path) }
 
 func BuildRepository(dir, output, baseURL, release, abi string) (model.Index, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil { return model.Index{}, err }
 	idx := model.Index{Repository: baseURL, Release: release, Channel: "stable", Generated: time.Now().UTC().Format(time.RFC3339), ABI: abi}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yspkg") { continue }
-		path := filepath.Join(dir, e.Name())
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil { return err }
+		if info.IsDir() || !strings.HasSuffix(info.Name(), ".yspkg") { return nil }
 		p, err := ReadPackageMetadata(path)
-		if err != nil { return model.Index{}, err }
+		if err != nil { return err }
 		sum, err := PackageSHA256(path)
-		if err != nil { return model.Index{}, err }
-		st, _ := os.Stat(path)
-		p.URL = strings.TrimRight(baseURL, "/") + "/" + e.Name()
+		if err != nil { return err }
+		rel, err := filepath.Rel(dir, path)
+		if err != nil { return err }
+		relURL := strings.ReplaceAll(filepath.ToSlash(rel), " ", "%20")
+		p.URL = strings.TrimRight(baseURL, "/") + "/" + relURL
+		st, err := os.Stat(path)
+		if err != nil { return err }
 		p.SHA256, p.Size = sum, st.Size()
 		idx.Packages = append(idx.Packages, p)
-	}
-	sort.Slice(idx.Packages, func(i,j int) bool { return idx.Packages[i].Name < idx.Packages[j].Name })
+		return nil
+	})
+	if err != nil { return model.Index{}, err }
+	sort.Slice(idx.Packages, func(i,j int) bool {
+		if idx.Packages[i].Name==idx.Packages[j].Name { return idx.Packages[i].Architecture < idx.Packages[j].Architecture }
+		return idx.Packages[i].Name < idx.Packages[j].Name
+	})
 	data, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil { return model.Index{}, err }
 	if err := os.WriteFile(output, append(data,'\n'), 0o644); err != nil { return model.Index{}, err }
