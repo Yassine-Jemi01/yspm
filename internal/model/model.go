@@ -99,6 +99,7 @@ type InstalledPackage struct {
 	Checksum        string          `json:"checksum,omitempty"`
 	Explicit        bool            `json:"explicit"`
 	Services        []Service       `json:"services,omitempty"`
+	Hooks           map[string]string `json:"hooks,omitempty"`
 	InstalledAt     time.Time       `json:"installed_at"`
 }
 
