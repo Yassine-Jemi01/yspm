@@ -116,3 +116,38 @@ func findHardcoreInitctl(m *Manager) string {
 	}
 	return ""
 }
+
+func ApplyTriggers(m *Manager, p model.Package) error {
+	if m.User || len(p.Triggers)==0 { return nil }
+	for _, trigger := range p.Triggers {
+		switch trigger {
+		case "ldconfig":
+			if m.Paths.Root=="/" {
+				if err:=runCommand("ldconfig"); err!=nil{return err}
+			} else {
+				if err:=runInRoot(m,"ldconfig","-r",m.Paths.Root);err!=nil{return err}
+			}
+		case "desktop-database":
+			dir:=filepath.Join(m.Paths.Root,"usr","share","applications")
+			if _,err:=os.Stat(dir);os.IsNotExist(err){continue}
+			if m.Paths.Root=="/" {
+				if err:=runCommand("update-desktop-database",dir);err!=nil{return err}
+			} else {
+				if err:=runInRoot(m,"update-desktop-database","/usr/share/applications");err!=nil{return err}
+			}
+		case "font-cache":
+			if m.Paths.Root=="/" {
+				if _,err:=exec.LookPath("fc-cache");err==nil{if err:=runCommand("fc-cache","-f");err!=nil{return err}}
+			} else if _,err:=os.Stat(filepath.Join(m.Paths.Root,"usr","bin","fc-cache"));err==nil {
+				if err:=runInRoot(m,"fc-cache","-f");err!=nil{return err}
+			}
+		case "icon-cache":
+			if m.Paths.Root=="/" {
+				if _,err:=exec.LookPath("gtk-update-icon-cache");err==nil{continue}
+			}
+		default:
+			return fmt.Errorf("unknown yspm trigger %q",trigger)
+		}
+	}
+	return nil
+}
