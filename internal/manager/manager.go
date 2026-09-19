@@ -3,7 +3,6 @@ package manager
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -411,15 +410,15 @@ func (m *Manager) RemoveMany(names []string,yes,autoSnapshot bool)error{
 		tx:=m.startTransaction("remove",names,"")
 		rb:=&transactionRollback{}
 		for _,name:=range names{
-			p:=db.Packages[name];archiveData:=stagedPackage{Pkg:model.Package{Name:p.Name,Version:p.Version,Services:p.Services},Scripts:map[string]string{}}
+			p:=db.Packages[name]
 			if err:=m.runInstalledHook(p,"preremove");err!=nil{return m.finishFailed(tx,err)}
 			if err:=RemovePackageFiles(m,p,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
 			if err:=DisableServices(m,p.Services);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-			delete(db.Packages,name);_ = archiveData
+			if err:=m.runInstalledHook(p,"postremove");err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+			delete(db.Packages,name)
 		}
 		if err:=store.SaveDBFor(m.User,db);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-		for _,name:=range names{if err:=m.runInstalledHookByName(name,"postremove");err!=nil{return m.finishFailed(tx,err)}}
-		rb.finalize();return m.finishSuccess(tx)
+				rb.finalize();return m.finishSuccess(tx)
 	})
 }
 
