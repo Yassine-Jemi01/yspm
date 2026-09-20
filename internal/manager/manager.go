@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,8 +36,9 @@ type stagedPackage struct {
 	Stage      string
 	Manifest   []model.FileEntry
 	Scripts    map[string]string
-	Legacy     bool
-	Command    string
+	Legacy         bool
+	HardcoreLegacy bool
+	Command       string
 	InstallDir string
 }
 
@@ -55,8 +57,10 @@ func (m *Manager) requirePrivileges(op string) error {
 }
 
 func (m *Manager) index() (model.Index, error) {
-	if idx, err := repo.LoadCachedIndex(); err == nil {
-		if err := repo.ValidateStableIndex(idx); err == nil { return idx, nil }
+	if !config.IsHardcoreRepository() {
+		if idx, err := repo.LoadCachedIndex(); err == nil {
+			if err := repo.ValidateStableIndex(idx); err == nil { return idx, nil }
+		}
 	}
 	if err := m.Update(); err != nil { return model.Index{}, err }
 	idx, err := repo.LoadCachedIndex()
@@ -66,7 +70,13 @@ func (m *Manager) index() (model.Index, error) {
 
 func (m *Manager) Update() error {
 	fmt.Printf("Updating stable repository...\n  %s\n", m.repository)
-	idx, err := repo.FetchIndex(m.repository)
+	var idx model.Index
+	var err error
+	if config.IsHardcoreRepository() {
+		idx, err = repo.FetchHardcoreIndex(m.repository)
+	} else {
+		idx, err = repo.FetchIndex(m.repository)
+	}
 	if err != nil { return err }
 	if err := repo.ValidateStableIndex(idx); err != nil { return err }
 	if err := repo.CacheIndex(idx); err != nil { return err }
@@ -173,6 +183,7 @@ func (m *Manager) runTransaction(action string,requested []string,yes,upgrade,au
 	return withLock(m.Paths.State,func() error{
 		idx,err:=m.index();if err!=nil{return err}
 		db,err:=store.LoadDBFor(m.User);if err!=nil{return err}
+		if config.IsHardcoreRepository(){if _,err:=m.syncLegacyPackages(&db);err!=nil{return err}}
 		if db.Release==""{db.Release=idx.Release;db.ABI=idx.ABI}
 		if db.Release!=idx.Release{return fmt.Errorf("installed release %s differs from repository %s; use explicit release upgrade",db.Release,idx.Release)}
 		if db.ABI==""{db.ABI=idx.ABI}
@@ -192,8 +203,9 @@ func (m *Manager) runTransaction(action string,requested []string,yes,upgrade,au
 		for _,sp:=range staged{
 			if err:=m.runScript(sp,"preinstall");err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
 			if err:=m.commitPackage(sp,db,rollback);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
-			if err:=m.runScript(sp,"postinstall");err!=nil{return m.finishFailed(tx,err)}
-			if err:=ApplyServices(m,sp.Pkg);err!=nil{return m.finishFailed(tx,err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{return m.finishFailed(tx,err)}
+			hook:="postinstall";if sp.HardcoreLegacy{hook="install"}
+			if err:=m.runScript(sp,hook);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
+			if err:=ApplyServices(m,sp.Pkg);err!=nil{rollback.rollback();return m.finishFailed(tx,err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
 			installed:=m.installedFromStage(sp)
 			installed.Explicit=containsName(plan.Requested,sp.Pkg.Name)||installed.Explicit
 			db.Packages[sp.Pkg.Name]=installed
@@ -241,6 +253,9 @@ func (m *Manager) chooseWithConstraints(r dependencyRequest,constraints []string
 		var candidates []model.Package
 		for _,p:=range idx.Packages{
 			if !m.packageUsable(p,firstNonEmpty(r.Arch,m.arch),idx){continue}
+			if p.Format==repo.HardcorePackageFormat {
+				hydrated,e:=m.hydrateHardcorePackage(p);if e!=nil{continue};p=hydrated
+			}
 			if !matchesNameOrProvide(p,alt){continue}
 			if !allSatisfied(p.Version,constraints){continue}
 			if p.ABI!=""&&idx.ABI!=""&&p.ABI!=idx.ABI{continue}
@@ -304,7 +319,17 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 		if p.Kind!="meta"&&!valid{if err:=repo.Download(p.URL,archive);err!=nil{errCh<-fmt.Errorf("download %s: %w",p.Name,err);return};if err:=repo.VerifySHA256(archive,p.SHA256);err!=nil{_ = os.Remove(archive);errCh<-fmt.Errorf("verify %s: %w",p.Name,err);return}}
 		stage,err:=os.MkdirTemp(m.Paths.Staging,p.Name+"-*");if err!=nil{errCh<-err;return};sp.Stage=stage;sp.Archive=archive
 		if p.Kind!="meta"{
-			if p.Format=="yspkg"||strings.HasSuffix(strings.ToLower(p.URL),".yspkg"){
+			if p.Format==repo.HardcorePackageFormat {
+				data,e:=repo.InspectHardcoreArchive(archive);if e!=nil{errCh<-e;return}
+				p.Version=data.Package.Version
+				p.Dependencies=data.Package.Dependencies
+				p.Kind="system";p.OS="linux";p.Format=repo.HardcorePackageFormat;p.Architecture=m.arch
+				sp.Pkg=p
+				sp.HardcoreLegacy=true
+				sp.Scripts["install"]=data.InstallScript
+				sp.Scripts["uninstall"]=data.UninstallScript
+				if err:=repo.ExtractArchive(archive,"tar",stage);err!=nil{errCh<-err;return}
+			} else if p.Format=="yspkg"||strings.HasSuffix(strings.ToLower(p.URL),".yspkg"){
 				data,e:=repo.ReadPackageData(archive);if e!=nil{errCh<-e;return};sp.Scripts=data.Scripts
 				sp.Manifest,e=repo.ListPackageFiles(archive);if e!=nil{errCh<-e;return}
 				if err:=repo.ExtractPackage(archive,stage);err!=nil{errCh<-err;return}
@@ -407,7 +432,7 @@ func copyNode(src,dst string)error{
 func (m *Manager) installedFromStage(sp stagedPackage)model.InstalledPackage{
 	hashes:=map[string]string{};configs:=map[string]string{};files:=[]string{}
 	for _,e:=range sp.Manifest{if e.Type!="dir"{files=append(files,e.Path);if e.Type=="file"{hashes[e.Path]=e.SHA256;if isConfig(sp.Pkg,e.Path){configs[e.Path]=e.SHA256}}}}
-	return model.InstalledPackage{Name:sp.Pkg.Name,Version:sp.Pkg.Version,Revision:sp.Pkg.Revision,Kind:sp.Pkg.Kind,Architecture:sp.Pkg.Architecture,ABI:sp.Pkg.ABI,Dependencies:append([]model.Dependency(nil),sp.Pkg.Dependencies...),InstallDir:sp.InstallDir,Command:sp.Command,Files:files,Manifest:sp.Manifest,FileHashes:hashes,ConfigHashes:configs,Checksum:sp.Pkg.SHA256,Explicit:false,Services:sp.Pkg.Services,Hooks:copyHooks(sp.Scripts),InstalledAt:time.Now()}
+	return model.InstalledPackage{Name:sp.Pkg.Name,Version:sp.Pkg.Version,Revision:sp.Pkg.Revision,Kind:sp.Pkg.Kind,Format:sp.Pkg.Format,Architecture:sp.Pkg.Architecture,ABI:sp.Pkg.ABI,Dependencies:append([]model.Dependency(nil),sp.Pkg.Dependencies...),InstallDir:sp.InstallDir,Command:sp.Command,Files:files,Manifest:sp.Manifest,FileHashes:hashes,ConfigHashes:configs,Checksum:sp.Pkg.SHA256,Explicit:false,Services:sp.Pkg.Services,Hooks:copyHooks(sp.Scripts),InstalledAt:time.Now()}
 }
 
 func isConfig(p model.Package,path string)bool{for _,x:=range p.ConfigFiles{if filepath.ToSlash(x)==filepath.ToSlash(path){return true}};return false}
@@ -428,6 +453,7 @@ func (m *Manager) RemoveMany(names []string,yes,autoSnapshot bool)error{
 		db,err:=store.LoadDBFor(m.User);if err!=nil{return err}
 		idx,err:=m.index();if err!=nil{return err}
 		if db.Release!=""&&db.Release!=idx.Release{return fmt.Errorf("installed release %s differs from repository %s",db.Release,idx.Release)}
+		if config.IsHardcoreRepository(){if _,err:=m.syncLegacyPackages(&db);err!=nil{return err}}
 		for _,name:=range names{if _,ok:=db.Packages[name];!ok{return fmt.Errorf("package %q is not installed",name)}}
 		for _,name:=range names{
 			for otherName,other:=range db.Packages{if otherName==name||containsName(names,otherName){continue};if dependsOn(other.Dependencies,name){return fmt.Errorf("cannot remove %q: installed package %q depends on it",name,otherName)}}
@@ -438,10 +464,14 @@ func (m *Manager) RemoveMany(names []string,yes,autoSnapshot bool)error{
 		rb:=&transactionRollback{}
 		for _,name:=range names{
 			p:=db.Packages[name]
-			if err:=m.runInstalledHook(p,"preremove");err!=nil{return m.finishFailed(tx,err)}
+			if p.Format==repo.HardcorePackageFormat {
+				if err:=m.runInstalledHook(p,"uninstall");err!=nil{return m.finishFailed(tx,err)}
+			} else if err:=m.runInstalledHook(p,"preremove");err!=nil{return m.finishFailed(tx,err)}
 			if err:=RemovePackageFiles(m,p,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
 			if err:=DisableServices(m,p.Services);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-			if err:=m.runInstalledHook(p,"postremove");err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+			if p.Format!=repo.HardcorePackageFormat {
+				if err:=m.runInstalledHook(p,"postremove");err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+			}
 			delete(db.Packages,name)
 		}
 		if err:=store.SaveDBFor(m.User,db);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
@@ -491,8 +521,23 @@ func (m *Manager) Autoremove(yes,autoSnapshot bool)error{
 func (m *Manager) Clean()error{if err:=os.RemoveAll(m.Paths.Cache);err!=nil{return err};fmt.Println("Package cache cleaned.");return nil}
 
 func (m *Manager) Check()error{
-	db,err:=store.LoadDBFor(m.User);if err!=nil{return err};problems:=0
-	for name,p:=range db.Packages{for _,e:=range p.Manifest{if e.Type=="dir"{continue};target:=filepath.Join(m.Paths.Root,filepath.FromSlash(e.Path));if _,err:=os.Lstat(target);err!=nil{fmt.Printf("%s: missing %s\n",name,e.Path);problems++}}}
+	db,err:=store.LoadDBFor(m.User);if err!=nil{return err}
+	if config.IsHardcoreRepository(){if _,err:=m.syncLegacyPackages(&db);err!=nil{return err}}
+	problems:=0
+	for name,p:=range db.Packages{
+		for _,e:=range p.Manifest{
+			if e.Type=="dir"{continue}
+			target:=filepath.Join(m.Paths.Root,filepath.FromSlash(e.Path))
+			info,err:=os.Lstat(target)
+			if os.IsNotExist(err){fmt.Printf("%s: missing %s\n",name,e.Path);problems++;continue}
+			if err!=nil{fmt.Printf("%s: cannot stat %s: %v\n",name,e.Path,err);problems++;continue}
+			if e.Type=="symlink"{got,err:=os.Readlink(target);if err!=nil||got!=e.LinkTarget{fmt.Printf("%s: symlink mismatch %s\n",name,e.Path);problems++};continue}
+			if e.Type=="file"&&e.SHA256!=""&&!isConfig(p,e.Path){
+				got:=hashPath(target);if got!=""&&!strings.EqualFold(got,e.SHA256){fmt.Printf("%s: modified %s\n",name,e.Path);problems++}
+			}
+			_ = info
+		}
+	}
 	if problems>0{return fmt.Errorf("integrity check found %d problem(s)",problems)};fmt.Println("Package database looks consistent.");return nil
 }
 
@@ -564,7 +609,16 @@ func (m *Manager) Worker(action,id,packed string,yes,autoSnapshot bool)error{
 
 func (m *Manager) runInstalledHookFromArchive(_ model.InstalledPackage,_ string)error{return nil}
 
-func packageFilename(p model.Package)string{if p.Format=="yspkg"{return p.Name+"-"+p.Version+"-"+p.Architecture+".yspkg"};if p.Kind=="appimage"||p.Format=="appimage"{return p.Name+"-"+p.Version+".AppImage"};if p.Format==""{return p.Name+"-"+p.Version};return p.Name+"-"+p.Version+"."+strings.ReplaceAll(p.Format,"/","-")}
+func packageFilename(p model.Package)string{
+	if p.Format=="yspkg"{return p.Name+"-"+p.Version+"-"+p.Architecture+".yspkg"}
+	if p.Format==repo.HardcorePackageFormat{
+		if u,err:=url.Parse(p.URL);err==nil&&u.Path!=""{name:=filepath.Base(u.Path);if name!="."&&name!="/"{return name}}
+		return p.Name+".tar"
+	}
+	if p.Kind=="appimage"||p.Format=="appimage"{return p.Name+"-"+p.Version+".AppImage"}
+	if p.Format==""{return p.Name+"-"+p.Version}
+	return p.Name+"-"+p.Version+"."+strings.ReplaceAll(p.Format,"/","-")
+}
 func namesFromPackages(ps []model.Package)[]string{out:=make([]string,len(ps));for i,p:=range ps{out[i]=p.Name};return out}
 func cleanupStaged(xs []stagedPackage){for _,x:=range xs{if x.Stage!=""{_ = os.RemoveAll(x.Stage)}}}
 func within(root,target string)bool{rel,err:=filepath.Rel(root,target);if err!=nil{return false};return rel=="."||(!strings.HasPrefix(rel,".."+string(os.PathSeparator))&&rel!="..")}

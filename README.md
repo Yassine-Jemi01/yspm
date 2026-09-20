@@ -76,6 +76,8 @@ yspm list --upgradable             Show available upgrades
 yspm list --explicit               Show explicitly installed packages
 yspm depends <package>             Show the dependency tree
 yspm why <package>                Explain reverse dependencies
+yspm owner <path>                 Show the package that owns a path
+yspm sync                         Import HardcoreLinux legacy packages
 yspm explain <package>            Explain ABI and dependency metadata
 yspm update                        Refresh repository metadata
 yspm upgrade                       Upgrade within the pinned release
@@ -373,6 +375,35 @@ sudo yspm upgrade --snapshot
 ~~~
 
 Live restoration of the running root filesystem is intentionally refused. Root restoration must be performed from a prepared rescue environment or another unmounted target.
+
+## HardcoreLinux compatibility
+
+yspm has a dedicated compatibility mode for the current HardcoreLinux package ecosystem.
+
+~~~bash
+export YSPM_REPOSITORY_FORMAT=hardcore
+sudo yspm update
+sudo yspm install sway
+~~~
+
+The mode reads HardcoreLinux `repo/list.sha256` metadata and gzip-compressed tar packages containing:
+
+~~~text
+/etc/installer/<package>/
+  install
+  pkinfo
+  uninstall
+~~~
+
+Existing installations can be imported without reinstalling anything:
+
+~~~bash
+sudo yspm sync
+sudo yspm list
+sudo yspm owner /usr/bin/sway
+~~~
+
+Legacy `pkinfo` dependencies, SHA-256 archive verification, file ownership, configuration preservation, and the legacy `install`/`uninstall` lifecycle are integrated with yspm transactions. Native `.yspkg` packages remain supported separately.
 
 ## Compatibility
 

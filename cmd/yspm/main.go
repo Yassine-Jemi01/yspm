@@ -56,6 +56,7 @@ Environment:
   YSPM_RELEASE_REPOSITORY_TEMPLATE  Release URL template, e.g. .../{release}/index.json
   YSPM_DATA_DIR / CACHE_DIR         Optional legacy overrides for tools using the old layout
   YSPM_REQUIRE_SIGNATURES=1         Require Ed25519 repository index signatures
+  YSPM_REPOSITORY_FORMAT             Repository format: yspkg (default) or hardcore
   YSPM_REPOSITORY_SIGNATURE         Detached repository signature URL/path
   YSPM_REPOSITORY_PUBLIC_KEY        Ed25519 public key (hex/base64)
   YSPM_FOREIGN_ARCHS                Comma-separated foreign architectures
@@ -95,7 +96,7 @@ func main() {
 	case "install":
 		if len(args)==0{fatal("install requires at least one package")}
 		local:=false
-		for _,a:=range args{if strings.HasSuffix(strings.ToLower(a),".yspkg"){local=true;break}}
+		for _,a:=range args{if isLocalArchiveArg(a){local=true;break}}
 		if local {
 			if err:=m.InstallLocal(args,yes,autoSnapshot);err!=nil{fatal(err.Error())}
 		} else if err:=m.InstallMany(args,yes,autoSnapshot);err!=nil{fatal(err.Error())}
@@ -118,6 +119,10 @@ func main() {
 		if len(args)!=1{fatal("depends requires one package")};if err:=m.Depends(args[0]);err!=nil{fatal(err.Error())}
 	case "why":
 		if len(args)!=1{fatal("why requires one package")};if err:=m.Why(args[0]);err!=nil{fatal(err.Error())}
+	case "owner":
+		if len(args)!=1{fatal("owner requires a path")};if err:=m.Owner(args[0]);err!=nil{fatal(err.Error())}
+	case "sync":
+		if err:=m.SyncLegacy();err!=nil{fatal(err.Error())}
 	case "explain":
 		if len(args)!=1{fatal("explain requires one package")};if err:=m.Explain(args[0]);err!=nil{fatal(err.Error())}
 	case "update":
@@ -211,6 +216,11 @@ func printInfo(p model.Package){
 }
 
 func has(xs []string,want string)bool{for _,x:=range xs{if x==want{return true}};return false}
+
+func isLocalArchiveArg(a string) bool {
+	x:=strings.ToLower(strings.TrimSpace(a))
+	return strings.HasSuffix(x,".yspkg")||strings.HasSuffix(x,".tar")||strings.HasSuffix(x,".tar.gz")||strings.HasSuffix(x,".tgz")||strings.HasSuffix(x,".tar.xz")||strings.HasSuffix(x,".tar.zst")
+}
 func valueAfter(xs []string,want string)string{for i,x:=range xs{if x==want&&i+1<len(xs){return xs[i+1]};if strings.HasPrefix(x,want+"="){return strings.TrimPrefix(x,want+"=")}};return ""}
 func strip(xs []string,wants ...string)[]string{out:=[]string{};skip:=false;set:=map[string]bool{};for _,w:=range wants{set[w]=true};for _,x:=range xs{if skip{skip=false;continue};if set[x]{if x=="--arch"{skip=true};continue};if strings.HasPrefix(x,"--arch="){continue};out=append(out,x)};return out}
 func value(s string)string{if s==""{return "none"};return s}
