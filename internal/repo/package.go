@@ -43,7 +43,7 @@ func ReadPackageMetadata(path string) (model.Package, error) {
 		if err == io.EOF { break }
 		if err != nil { return model.Package{}, err }
 		if h.Name == "metadata.json" {
-			data, err := io.ReadAll(io.LimitReader(tr, 4<<20))
+			data, err := io.ReadAll(io.LimitReader(tr, 64<<20))
 			if err != nil { return model.Package{}, err }
 			var p model.Package
 			if err := json.Unmarshal(data, &p); err != nil { return model.Package{}, fmt.Errorf("invalid package metadata: %w", err) }
@@ -68,7 +68,7 @@ func ReadPackageData(path string) (PackageData, error) {
 		if err != nil { return PackageData{}, err }
 		switch {
 		case h.Name == "metadata.json":
-			data, err := io.ReadAll(io.LimitReader(tr, 4<<20))
+			data, err := io.ReadAll(io.LimitReader(tr, 64<<20))
 			if err != nil { return PackageData{}, err }
 			if err := json.Unmarshal(data, &out.Metadata); err != nil { return PackageData{}, err }
 		case strings.HasPrefix(h.Name, "scripts/") && h.Typeflag == tar.TypeReg:
