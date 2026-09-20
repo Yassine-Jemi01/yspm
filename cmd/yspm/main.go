@@ -25,6 +25,8 @@ Commands:
   list                       List installed packages
   depends <pkg>              Show the dependency tree
   why <pkg>                  Show why an installed package is needed
+  owner <path>               Show which package owns a filesystem path
+  sync                       Import installed HardcoreLinux legacy packages
   explain <pkg>              Explain package ABI/dependency metadata
   update                     Refresh the pinned repository index
   upgrade                    Upgrade packages within the current release
@@ -216,6 +218,11 @@ func printInfo(p model.Package){
 }
 
 func has(xs []string,want string)bool{for _,x:=range xs{if x==want{return true}};return false}
+
+func isLocalArchiveArg(a string) bool {
+	x:=strings.ToLower(strings.TrimSpace(a))
+	return strings.HasSuffix(x,".yspkg")||strings.HasSuffix(x,".tar")||strings.HasSuffix(x,".tar.gz")||strings.HasSuffix(x,".tgz")||strings.HasSuffix(x,".tar.xz")||strings.HasSuffix(x,".tar.zst")
+}
 
 func isLocalArchiveArg(a string) bool {
 	x:=strings.ToLower(strings.TrimSpace(a))
