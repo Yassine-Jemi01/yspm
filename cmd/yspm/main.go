@@ -224,10 +224,6 @@ func isLocalArchiveArg(a string) bool {
 	return strings.HasSuffix(x,".yspkg")||strings.HasSuffix(x,".tar")||strings.HasSuffix(x,".tar.gz")||strings.HasSuffix(x,".tgz")||strings.HasSuffix(x,".tar.xz")||strings.HasSuffix(x,".tar.zst")
 }
 
-func isLocalArchiveArg(a string) bool {
-	x:=strings.ToLower(strings.TrimSpace(a))
-	return strings.HasSuffix(x,".yspkg")||strings.HasSuffix(x,".tar")||strings.HasSuffix(x,".tar.gz")||strings.HasSuffix(x,".tgz")||strings.HasSuffix(x,".tar.xz")||strings.HasSuffix(x,".tar.zst")
-}
 func valueAfter(xs []string,want string)string{for i,x:=range xs{if x==want&&i+1<len(xs){return xs[i+1]};if strings.HasPrefix(x,want+"="){return strings.TrimPrefix(x,want+"=")}};return ""}
 func strip(xs []string,wants ...string)[]string{out:=[]string{};skip:=false;set:=map[string]bool{};for _,w:=range wants{set[w]=true};for _,x:=range xs{if skip{skip=false;continue};if set[x]{if x=="--arch"{skip=true};continue};if strings.HasPrefix(x,"--arch="){continue};out=append(out,x)};return out}
 func value(s string)string{if s==""{return "none"};return s}
