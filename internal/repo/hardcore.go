@@ -86,9 +86,9 @@ func hardcoreListSource(source string) (string, string, error) {
 	if u, err := url.Parse(source); err == nil && u.Scheme != "" && u.Scheme != "file" {
 		base := strings.TrimRight(source, "/")
 		if strings.HasSuffix(base, "/list.sha256") {
-			return base, strings.TrimSuffix(base, "/list.sha256")
+			return base, strings.TrimSuffix(base, "/list.sha256"), nil
 		}
-		return base + "/list.sha256", base
+		return base + "/list.sha256", base, nil
 	}
 	if strings.HasPrefix(source, "file://") {
 		u, err := url.Parse(source)
@@ -102,12 +102,12 @@ func hardcoreListSource(source string) (string, string, error) {
 		return "", "", err
 	}
 	if info.IsDir() {
-		return filepath.Join(source, "list.sha256"), "file://" + filepath.ToSlash(source)
+		return filepath.Join(source, "list.sha256"), "file://" + filepath.ToSlash(source), nil
 	}
 	if filepath.Base(source) != "list.sha256" {
 		return "", "", fmt.Errorf("HardcoreLinux source must be a repo directory or list.sha256")
 	}
-	return source, "file://" + filepath.ToSlash(filepath.Dir(source))
+	return source, "file://" + filepath.ToSlash(filepath.Dir(source)), nil
 }
 
 func InspectHardcoreArchive(path string) (HardcorePackageData, error) {
