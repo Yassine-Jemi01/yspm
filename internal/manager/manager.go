@@ -532,7 +532,7 @@ func (m *Manager) Check()error{
 			if os.IsNotExist(err){fmt.Printf("%s: missing %s\n",name,e.Path);problems++;continue}
 			if err!=nil{fmt.Printf("%s: cannot stat %s: %v\n",name,e.Path,err);problems++;continue}
 			if e.Type=="symlink"{got,err:=os.Readlink(target);if err!=nil||got!=e.LinkTarget{fmt.Printf("%s: symlink mismatch %s\n",name,e.Path);problems++};continue}
-			if e.Type=="file"&&e.SHA256!=""&&!isConfig(p,e.Path){
+			if e.Type=="file"&&e.SHA256!=""&&p.ConfigHashes[e.Path]==""{
 				got:=hashPath(target);if got!=""&&!strings.EqualFold(got,e.SHA256){fmt.Printf("%s: modified %s\n",name,e.Path);problems++}
 			}
 			_ = info
