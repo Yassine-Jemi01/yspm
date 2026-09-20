@@ -73,7 +73,7 @@ func main() {
 	m := manager.New(user, arch)
 
 	cmd := os.Args[1]
-	args := strip(os.Args[2:], "--user", "--snapshot")
+	args := strip(os.Args[2:], "--user", "--snapshot", "-y", "--yes", "--background")
 	if cmd == "__worker" {
 		if len(args) < 3 { fatal("invalid worker arguments") }
 		action,id := args[0],args[1]
