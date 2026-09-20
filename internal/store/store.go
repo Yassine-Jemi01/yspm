@@ -11,7 +11,7 @@ import (
 	"github.com/Yassine-Jemi01/yspm/internal/model"
 )
 
-const CurrentSchema = 2
+const CurrentSchema = 3
 
 func LoadDB() (model.Database, error) {
 	data, err := os.ReadFile(func() string {

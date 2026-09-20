@@ -85,6 +85,7 @@ type InstalledPackage struct {
 	Version         string          `json:"version"`
 	Revision        int             `json:"revision,omitempty"`
 	Kind            string          `json:"kind"`
+	Format          string          `json:"format,omitempty"`
 	Architecture    string          `json:"architecture,omitempty"`
 	ABI             string          `json:"abi,omitempty"`
 	Dependencies    []Dependency    `json:"dependencies,omitempty"`

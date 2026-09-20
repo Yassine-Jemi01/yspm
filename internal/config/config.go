@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	DefaultRepository = "https://raw.githubusercontent.com/Yassine-Jemi01/yspm/main/repo/releases/1/index.json"
-	DefaultSystemABI  = "yspm-abi-1"
+	DefaultRepository         = "https://raw.githubusercontent.com/Yassine-Jemi01/yspm/main/repo/releases/1/index.json"
+	DefaultHardcoreRepository = "https://raw.githubusercontent.com/AMAZING2545/HardcoreLinux/main/repo"
+	DefaultSystemABI          = "yspm-abi-1"
 )
 
 type Paths struct {
@@ -65,6 +66,7 @@ func NewPaths(user bool) (Paths, error) {
 
 func RepositoryURL() string {
 	if v := os.Getenv("YSPM_REPOSITORY"); v != "" { return v }
+	if IsHardcoreRepository() { return DefaultHardcoreRepository }
 	return DefaultRepository
 }
 
@@ -86,6 +88,14 @@ func ReleaseRepositoryURL(release string) string {
 func RepositorySignatureURL() string { return os.Getenv("YSPM_REPOSITORY_SIGNATURE") }
 func RepositoryPublicKey() string { return os.Getenv("YSPM_REPOSITORY_PUBLIC_KEY") }
 func RequireRepositorySignature() bool { return os.Getenv("YSPM_REQUIRE_SIGNATURES") == "1" }
+
+func RepositoryFormat() string {
+	format := strings.ToLower(strings.TrimSpace(os.Getenv("YSPM_REPOSITORY_FORMAT")))
+	if format == "" { return "yspkg" }
+	return format
+}
+
+func IsHardcoreRepository() bool { return RepositoryFormat() == "hardcore" }
 
 func SnapshotRoot() string {
 	if v := os.Getenv("YSPM_SNAPSHOT_ROOT"); v != "" { return v }
