@@ -178,8 +178,11 @@ yspm build \
   --name hello \
   --version 1.0.0 \
   --abi yspm-abi-1 \
-  --arch x86_64
+  --arch x86_64 \
+  --depends libssl,openssl
 ~~~
+
+The `--depends` option accepts a comma-separated list and writes the package names to `metadata.json`.
 
 ## Dependencies and shared libraries
 
