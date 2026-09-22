@@ -171,12 +171,25 @@ func buildCommand(m *manager.Manager,args []string)error{
 	arch:=fs.String("arch","","target architecture")
 	license:=fs.String("license","unknown","package license")
 	maintainer:=fs.String("maintainer","","package maintainer")
+	depends:=fs.String("depends","","comma-separated package dependencies")
 	scripts:=fs.String("scripts","","directory containing pre/post install/remove scripts")
 	if err:=fs.Parse(args);err!=nil{return err}
 	if *root==""||*out==""||*name==""||*version==""{return fmt.Errorf("--root, --output, --name and --version are required")}
-	p,err:=m.Build(*root,*out,*name,*version,*desc,*abi,*arch,*license,*maintainer,*scripts)
+	deps:=parseDependencies(*depends)
+	p,err:=m.Build(*root,*out,*name,*version,*desc,*abi,*arch,*license,*maintainer,deps,*scripts)
 	if err!=nil{return err}
 	fmt.Printf("Built %s %s -> %s\n",p.Name,p.Version,*out);return nil
+}
+
+func parseDependencies(value string)[]model.Dependency{
+	if strings.TrimSpace(value)==""{return nil}
+	parts:=strings.Split(value,",")
+	deps:=make([]model.Dependency,0,len(parts))
+	for _,part:=range parts{
+		part=strings.TrimSpace(part)
+		if part!=""{deps=append(deps,model.Dependency(part))}
+	}
+	return deps
 }
 
 func repoCommand(m *manager.Manager,args []string)error{
