@@ -571,8 +571,8 @@ func (m *Manager) Audit()error{
 	if found==0{fmt.Println("No known vulnerabilities in installed package metadata.")};return nil
 }
 
-func (m *Manager) Build(root,output,name,version,desc,abi,arch,license,maintainer,scripts string)(model.Package,error){
-	p:=model.Package{Name:name,Version:version,Description:desc,ABI:abi,Architecture:arch,License:license,Maintainer:maintainer,Format:"yspkg",Kind:"system",OS:"linux",Revision:1}
+func (m *Manager) Build(root,output,name,version,desc,abi,arch,license,maintainer string,deps []model.Dependency,scripts string)(model.Package,error){
+	p:=model.Package{Name:name,Version:version,Description:desc,ABI:abi,Architecture:arch,License:license,Maintainer:maintainer,Dependencies:deps,Format:"yspkg",Kind:"system",OS:"linux",Revision:1}
 	if p.ABI==""{p.ABI=config.DefaultSystemABI};if p.Architecture==""{p.Architecture=m.arch};if p.License==""{p.License="unknown"}
 	if err:=repo.BuildPackage(root,output,p,scripts);err!=nil{return model.Package{},err}
 	meta,err:=repo.ReadPackageMetadata(output);if err!=nil{return model.Package{},err};return meta,nil
