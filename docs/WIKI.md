@@ -1,8 +1,6 @@
 # yspm Wiki
 
 
-![Tux](https://upload.wikimedia.org/wikipedia/commons/3/35/Tux.svg)
-
 ## Current release
 
 `v0.2.0`
