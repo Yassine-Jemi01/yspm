@@ -1,6 +1,5 @@
 # yspm Wiki
 
-![Go](https://upload.wikimedia.org/wikipedia/commons/0/05/Go_Logo_Blue.svg)
 
 ![Tux](https://upload.wikimedia.org/wikipedia/commons/3/35/Tux.svg)
 
