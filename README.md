@@ -444,3 +444,5 @@ See the documentation for more details:
 ## License
 
 GNU General Public License v3.0.
+
+[![Architecture diagram of yassine-jemi01/yspm](https://gitdiagram.com/yassine-jemi01/yspm/diagram.png)](https://gitdiagram.com/yassine-jemi01/yspm?utm_source=readme&utm_medium=picture)
