@@ -69,7 +69,7 @@ func loadDBPath(path string) (model.Database, error) {
 	return db, nil
 }
 
-func withDBLock(databasePath string, fn func() error) error {
+func withDBLock(databasePath string, fn func() error) (retErr error) {
 	if err := os.MkdirAll(filepath.Dir(databasePath), 0o755); err != nil {
 		return err
 	}
@@ -78,7 +78,11 @@ func withDBLock(databasePath string, fn func() error) error {
 	if err != nil {
 		return fmt.Errorf("open database lock: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close database lock: %w", closeErr))
+		}
+	}()
 	for {
 		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
 		if err == nil {
@@ -90,7 +94,9 @@ func withDBLock(databasePath string, fn func() error) error {
 		return fmt.Errorf("acquire database lock: %w", err)
 	}
 	defer func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		if unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); unlockErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("release database lock: %w", unlockErr))
+		}
 	}()
 	return fn()
 }
@@ -127,11 +133,15 @@ func writeDBPath(path string, db model.Database) error {
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
 	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		_ = tmp.Close()
+		if closeErr := tmp.Close(); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("close database temp file: %w", closeErr))
+		}
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
+		if closeErr := tmp.Close(); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("close database temp file: %w", closeErr))
+		}
 		return err
 	}
 	if err := tmp.Close(); err != nil {
