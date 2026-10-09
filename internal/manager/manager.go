@@ -222,18 +222,17 @@ func (m *Manager) runTransaction(action string,requested []string,yes,upgrade,au
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		rollback:=&transactionRollback{}
 		for _,sp:=range staged{
-			if err:=m.runScript(sp,"preinstall");err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
-			if err:=m.commitPackage(sp,db,rollback);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
+			if err:=m.runScript(sp,"preinstall");err!=nil{return m.rollbackAndFail(tx,rollback,err)}
+			if err:=m.commitPackage(sp,db,rollback);err!=nil{return m.rollbackAndFail(tx,rollback,err)}
 			hook:="postinstall";if sp.HardcoreLegacy{hook="install"}
-			if err:=m.runScript(sp,hook);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
-			if err:=ApplyServices(m,sp.Pkg);err!=nil{rollback.rollback();return m.finishFailed(tx,err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
+			if err:=m.runScript(sp,hook);err!=nil{return m.rollbackAndFail(tx,rollback,err)}
+			if err:=ApplyServices(m,sp.Pkg);err!=nil{return m.rollbackAndFail(tx,rollback,err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{return m.rollbackAndFail(tx,rollback,err)}
 			installed:=m.installedFromStage(sp)
 			installed.Explicit=containsName(plan.Requested,sp.Pkg.Name)||installed.Explicit
 			db.Packages[sp.Pkg.Name]=installed
 		}
-		if err:=m.saveDatabasePreservingHistory(db);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
-		rollback.finalize()
-		return m.finishSuccess(tx)
+		if err:=m.saveDatabasePreservingHistory(db);err!=nil{return m.rollbackAndFail(tx,rollback,err)}
+		return m.finishCommitted(tx, rollback)
 	})
 }
 
@@ -412,8 +411,37 @@ func (m *Manager) validateConflicts(staged []stagedPackage,db model.Database)err
 
 type rollbackEntry struct{target,backup string;created bool}
 type transactionRollback struct{entries []rollbackEntry}
-func(r *transactionRollback)rollback(){for i:=len(r.entries)-1;i>=0;i--{e:=r.entries[i];_ = os.RemoveAll(e.target);if e.backup!=""{_ = os.MkdirAll(filepath.Dir(e.target),0o755);_ = os.Rename(e.backup,e.target)}}}
-func(r *transactionRollback)finalize(){for _,e:=range r.entries{if e.backup!=""{_ = os.RemoveAll(e.backup)}}}
+func (r *transactionRollback) rollback() error {
+	var result error
+	for i := len(r.entries) - 1; i >= 0; i-- {
+		e := r.entries[i]
+		if err := os.RemoveAll(e.target); err != nil {
+			result = errors.Join(result, fmt.Errorf("remove partially committed path %s: %w", e.target, err))
+			continue
+		}
+		if e.backup == "" { continue }
+		if err := os.MkdirAll(filepath.Dir(e.target), 0o755); err != nil {
+			result = errors.Join(result, fmt.Errorf("prepare rollback for %s: %w", e.target, err))
+			continue
+		}
+		if err := os.Rename(e.backup, e.target); err != nil {
+			result = errors.Join(result, fmt.Errorf("restore %s from %s: %w", e.target, e.backup, err))
+		}
+	}
+	return result
+}
+
+func (r *transactionRollback) finalize() error {
+	var result error
+	for _, e := range r.entries {
+		if e.backup != "" {
+			if err := os.RemoveAll(e.backup); err != nil {
+				result = errors.Join(result, fmt.Errorf("remove rollback backup %s: %w", e.backup, err))
+			}
+		}
+	}
+	return result
+}
 
 func (m *Manager) commitPackage(sp stagedPackage,db model.Database,rb *transactionRollback)error{
 	for _,e:=range sp.Manifest{
@@ -500,15 +528,15 @@ func (m *Manager) RemoveMany(names []string,yes,autoSnapshot bool)error{
 			if p.Format==repo.HardcorePackageFormat {
 				if err:=m.runInstalledHook(p,"uninstall");err!=nil{return m.finishFailed(tx,err)}
 			} else if err:=m.runInstalledHook(p,"preremove");err!=nil{return m.finishFailed(tx,err)}
-			if err:=RemovePackageFiles(m,p,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-			if err:=DisableServices(m,p.Services);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+			if err:=RemovePackageFiles(m,p,rb);err!=nil{return m.rollbackAndFail(tx,rb,err)}
+			if err:=DisableServices(m,p.Services);err!=nil{return m.rollbackAndFail(tx,rb,err)}
 			if p.Format!=repo.HardcorePackageFormat {
-				if err:=m.runInstalledHook(p,"postremove");err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+				if err:=m.runInstalledHook(p,"postremove");err!=nil{return m.rollbackAndFail(tx,rb,err)}
 			}
 			delete(db.Packages,name)
 		}
-		if err:=m.saveDatabasePreservingHistory(db);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-				rb.finalize();return m.finishSuccess(tx)
+		if err:=m.saveDatabasePreservingHistory(db);err!=nil{return m.rollbackAndFail(tx,rb,err)}
+				return m.finishCommitted(tx, rb)
 	})
 }
 
@@ -599,8 +627,8 @@ func (m *Manager) UpgradeRelease(release string,yes,autoSnapshot bool)error{
 		rb:=&transactionRollback{}
 		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer cleanupStaged(staged)
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
-		for _,sp:=range staged{if err:=m.commitPackage(sp,db,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)};db.Packages[sp.Pkg.Name]=m.installedFromStage(sp)}
-		db.Release,db.ABI=idx.Release,idx.ABI;if err:=m.saveDatabasePreservingHistory(db);err!=nil{rb.rollback();return m.finishFailed(tx,err)};if err := repo.CacheIndexProofFor(m.User, url, indexData, signature); err != nil {
+		for _,sp:=range staged{if err:=m.commitPackage(sp,db,rb);err!=nil{return m.rollbackAndFail(tx,rb,err)};db.Packages[sp.Pkg.Name]=m.installedFromStage(sp)}
+		db.Release,db.ABI=idx.Release,idx.ABI;if err:=m.saveDatabasePreservingHistory(db);err!=nil{return m.rollbackAndFail(tx,rb,err)};if err := repo.CacheIndexProofFor(m.User, url, indexData, signature); err != nil {
 			if finishErr := m.finishSuccess(tx); finishErr != nil { return errors.Join(err, finishErr) }
 			return fmt.Errorf("release upgraded, but repository index cache could not be updated: %w", err)
 		}
@@ -683,23 +711,76 @@ func (m *Manager) finishCommitted(tx model.Transaction, rb *transactionRollback)
 	return errors.Join(successErr, cleanupErr)
 }
 
-func (m *Manager) RunBackground(action string,args []string,yes,autoSnapshot bool)error{
-	if !m.User{if err:=m.requirePrivileges("background "+action);err!=nil{return err}}
-	tx:=m.startTransaction(action,args,"");logDir:=m.Paths.Transactions;if err:=os.MkdirAll(logDir,0o755);err!=nil{return err};logFile,err:=os.OpenFile(filepath.Join(logDir,tx.ID+".log"),os.O_CREATE|os.O_WRONLY|os.O_TRUNC,0o644);if err!=nil{return err}
-	cmd:=exec.Command(os.Args[0],"__worker",action,tx.ID,"--",strings.Join(args,"\x00"));cmd.Stdout=logFile;cmd.Stderr=logFile;cmd.Env=os.Environ();cmd.Env=append(cmd.Env,"YSPM_USER="+boolText(m.User),"YSPM_ARCH="+m.arch);if err:=cmd.Start();err!=nil{_ = logFile.Close();return err};_ = logFile.Close();fmt.Printf("Transaction %s started in background.\n",tx.ID);return nil
-}
-func (m *Manager) Worker(action,id,packed string,yes,autoSnapshot bool)error{
-	args:=[]string{};if packed!=""{args=strings.Split(packed,"\x00")};var err error
-	switch action{
-	case "install":
-		local:=false;for _,a:=range args{if strings.HasSuffix(strings.ToLower(a),".yspkg"){local=true;break}}
-		if local{err=m.InstallLocal(args,true,autoSnapshot)}else{err=m.InstallMany(args,true,autoSnapshot)}
-	case "remove":err=m.RemoveMany(args,true,autoSnapshot)
-	case "upgrade":err=m.Upgrade(true,autoSnapshot)
-	default:err=fmt.Errorf("unsupported background action %q",action)
+func (m *Manager) RunBackground(action string, args []string, yes, autoSnapshot bool) error {
+	if !m.User {
+		if err := m.requirePrivileges("background " + action); err != nil { return err }
 	}
-	tx,e:=store.GetTransactionFor(m.User,id);if e==nil{if err==nil{tx.Status="success"}else{tx.Status="failed";tx.Error=err.Error()};tx.FinishedAt=time.Now();_=store.UpdateTransactionFor(m.User,tx)}
-	return err
+	if !yes && !confirm(fmt.Sprintf("Start background %s transaction? [y/N] ", action)) {
+		fmt.Println("Aborted.")
+		return nil
+	}
+	return withLock(m.Paths.State, func() error {
+		tx, err := m.startTransaction(action, args, "")
+		if err != nil { return err }
+		if err := os.MkdirAll(m.Paths.Transactions, 0o755); err != nil {
+			return m.finishFailed(tx, fmt.Errorf("create background log directory: %w", err))
+		}
+		logFile, err := os.OpenFile(filepath.Join(m.Paths.Transactions, tx.ID+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil { return m.finishFailed(tx, fmt.Errorf("open background transaction log: %w", err)) }
+		workerArgs := []string{"__worker", action, tx.ID, "--"}
+		workerArgs = append(workerArgs, args...)
+		workerArgs = append(workerArgs, "--yes")
+		if autoSnapshot { workerArgs = append(workerArgs, "--snapshot") }
+		cmd := exec.Command(os.Args[0], workerArgs...)
+		cmd.Stdout, cmd.Stderr = logFile, logFile
+		cmd.Env = append(os.Environ(), "YSPM_USER="+boolText(m.User), "YSPM_ARCH="+m.arch)
+		startErr := cmd.Start()
+		closeErr := logFile.Close()
+		if startErr != nil {
+			startErr = fmt.Errorf("start background worker: %w", startErr)
+			if closeErr != nil { startErr = errors.Join(startErr, fmt.Errorf("close background log: %w", closeErr)) }
+			return m.finishFailed(tx, startErr)
+		}
+		if closeErr != nil { fmt.Fprintf(os.Stderr, "yspm: warning: close parent log descriptor: %v\n", closeErr) }
+		fmt.Printf("Transaction %s started in background.\n", tx.ID)
+		return nil
+	})
+}
+
+func (m *Manager) Worker(action, id string, args []string, yes, autoSnapshot bool) error {
+	var operationErr error
+	switch action {
+	case "install":
+		local := false
+		for _, a := range args {
+			lower := strings.ToLower(a)
+			if strings.HasSuffix(lower, ".yspkg") || strings.HasSuffix(lower, ".tar") || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.xz") || strings.HasSuffix(lower, ".tar.zst") {
+				local = true
+				break
+			}
+		}
+		if local { operationErr = m.InstallLocal(args, true, autoSnapshot) } else { operationErr = m.InstallMany(args, true, autoSnapshot) }
+	case "remove":
+		operationErr = m.RemoveMany(args, true, autoSnapshot)
+	case "upgrade":
+		operationErr = m.Upgrade(true, autoSnapshot)
+	case "autoremove":
+		operationErr = m.Autoremove(true, autoSnapshot)
+	default:
+		operationErr = fmt.Errorf("unsupported background action %q", action)
+	}
+	recordErr := withLock(m.Paths.State, func() error {
+		tx, err := store.GetTransactionFor(m.User, id)
+		if err != nil { return err }
+		if operationErr == nil { tx.Status = "success" } else { tx.Status, tx.Error = "failed", operationErr.Error() }
+		tx.FinishedAt = time.Now()
+		return store.UpdateTransactionFor(m.User, tx)
+	})
+	if recordErr != nil {
+		if operationErr != nil { return errors.Join(operationErr, fmt.Errorf("record background transaction result: %w", recordErr)) }
+		return fmt.Errorf("record background transaction result: %w", recordErr)
+	}
+	return operationErr
 }
 
 func (m *Manager) runInstalledHookFromArchive(_ model.InstalledPackage,_ string)error{return nil}
