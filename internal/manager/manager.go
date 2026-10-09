@@ -604,27 +604,78 @@ func (m *Manager) History()error{db,err:=store.LoadDBFor(m.User);if err!=nil{ret
 func (m *Manager) Transaction(id string)error{t,err:=store.GetTransactionFor(m.User,id);if err!=nil{return err};fmt.Printf("ID: %s\nAction: %s\nStatus: %s\nStarted: %s\n",t.ID,t.Action,t.Status,t.StartedAt.Format(time.RFC3339));if !t.FinishedAt.IsZero(){fmt.Printf("Finished: %s\n",t.FinishedAt.Format(time.RFC3339))};if t.Error!=""{fmt.Printf("Error: %s\n",t.Error)};return nil}
 func (m *Manager) Release()error{db,err:=store.LoadDBFor(m.User);if err!=nil{return err};idx,err:=m.index();if err!=nil{return err};fmt.Printf("Installed release: %s\nRepository release: %s\nABI: %s\nPackages installed: %d\n",db.Release,idx.Release,valueOr(db.ABI,"none"),len(db.Packages));return nil}
 
-func (m *Manager) UpgradeRelease(release string,yes,autoSnapshot bool)error{
-	if err:=m.requirePrivileges("release upgrade");err!=nil{return err}
-	return withLock(m.Paths.State,func()error{
-		db,err:=store.LoadDBFor(m.User);if err!=nil{return err};if db.Release==release{return errors.New("requested release is already installed")}
-		url:=config.ReleaseRepositoryURL(release);fmt.Printf("Loading release %s from %s\n",release,url)
-		idx,err:=repo.FetchIndex(url);if err!=nil{return err}
-		if err:=repo.ValidateStableIndex(idx);err!=nil{return err}
-		if !yes{fmt.Printf("Upgrade release %s -> %s? [y/N] ",db.Release,release);if !confirm(""){return nil}}
-		plan,err:=m.resolve(idx,db,nil,true);if err!=nil{return fmt.Errorf("release resolution failed: %w",err)}
-		oldRepo:=m.repository;m.repository=url;defer func(){m.repository=oldRepo}()
-		tx, err := m.startTransaction("release-upgrade",namesFromPackages(plan.Packages),""); if err != nil { return err }
-		rb := &transactionRollback{}
+func (m *Manager) UpgradeRelease(release string, yes, autoSnapshot bool) error {
+	if err := m.requirePrivileges("release upgrade"); err != nil {
+		return err
+	}
+	return withLock(m.Paths.State, func() error {
+		db, err := store.LoadDBFor(m.User)
+		if err != nil {
+			return err
+		}
+		if db.Release == release {
+			return errors.New("requested release is already installed")
+		}
+		source := config.ReleaseRepositoryURL(release)
+		fmt.Printf("Loading release %s from %s\n", release, source)
+
+		idx, rawIndex, signature, err := repo.FetchIndexData(source)
+		if err != nil {
+			return err
+		}
+		if err := repo.ValidateStableIndex(idx); err != nil {
+			return err
+		}
+		if !yes {
+			fmt.Printf("Upgrade release %s -> %s? [y/N] ", db.Release, release)
+			if !confirm("") {
+				return nil
+			}
+		}
+		plan, err := m.resolve(idx, db, nil, true)
+		if err != nil {
+			return fmt.Errorf("release resolution failed: %w", err)
+		}
+
+		oldRepo := m.repository
+		m.repository = source
+		defer func() { m.repository = oldRepo }()
+
 		if autoSnapshot && !m.User {
 			if _, err := CreateSnapshot(m); err != nil {
 				return fmt.Errorf("create pre-release-upgrade snapshot: %w", err)
 			}
 		}
-		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer cleanupStaged(staged)
-		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
-		for _,sp:=range staged{if err:=m.commitPackage(sp,db,rb);err!=nil{return m.finishFailedWithRollback(tx, rb, err)};db.Packages[sp.Pkg.Name]=m.installedFromStage(sp)}
-		db.Release,db.ABI=idx.Release,idx.ABI;if err:=store.SaveDBFor(m.User,db);err!=nil{return m.finishFailedWithRollback(tx, rb, err)};return m.finishCommitted(tx, rb.finalize())
+		tx, err := m.startTransaction("release-upgrade", namesFromPackages(plan.Packages), "")
+		if err != nil {
+			return err
+		}
+		rb := &transactionRollback{}
+		staged, err := m.prepare(plan.Packages)
+		if err != nil {
+			return m.finishFailed(tx, err)
+		}
+		defer cleanupStaged(staged)
+		if err := m.validateConflicts(staged, db); err != nil {
+			return m.finishFailed(tx, err)
+		}
+		for _, sp := range staged {
+			if err := m.commitPackage(sp, db, rb); err != nil {
+				return m.finishFailedWithRollback(tx, rb, err)
+			}
+			db.Packages[sp.Pkg.Name] = m.installedFromStage(sp)
+		}
+		db.Release, db.ABI = idx.Release, idx.ABI
+		if err := store.SaveDBFor(m.User, db); err != nil {
+			return m.finishFailedWithRollback(tx, rb, err)
+		}
+		cleanupErr := rb.finalize()
+		statusErr := m.finishSuccess(tx)
+		cacheErr := repo.CacheFetchedIndexFor(rawIndex, signature, m.User)
+		if cacheErr != nil {
+			cacheErr = fmt.Errorf("release upgraded but target index could not be cached: %w", cacheErr)
+		}
+		return errors.Join(cleanupErr, statusErr, cacheErr)
 	})
 }
 
