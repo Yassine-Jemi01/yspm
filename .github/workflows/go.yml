@@ -17,8 +17,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
-      - name: Inspect formatting differences
-        run: gofmt -d internal/manager/version.go internal/store/store.go
       - name: Check formatting of maintained files
         run: |
           files="
