@@ -80,11 +80,11 @@ func TestCacheDirForHonorsExplicitUserMode(t *testing.T) {
 
 func TestNormalizeArchAliases(t *testing.T) {
 	tests := map[string]string{
-		"amd64":  "x86_64",
-		"X86-64": "x86_64",
-		"arm64":  "aarch64",
-		"armhf":  "armv7",
-		"386":    "i386",
+		"amd64":     "x86_64",
+		"X86-64":    "x86_64",
+		"arm64":     "aarch64",
+		"armhf":     "armv7",
+		"386":       "i386",
 		" RISCV64 ": "riscv64",
 	}
 	for input, want := range tests {
