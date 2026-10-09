@@ -401,10 +401,46 @@ func (m *Manager) validateConflicts(staged []stagedPackage,db model.Database)err
 	return nil
 }
 
-type rollbackEntry struct{target,backup string;created bool}
-type transactionRollback struct{entries []rollbackEntry}
-func(r *transactionRollback)rollback(){for i:=len(r.entries)-1;i>=0;i--{e:=r.entries[i];_ = os.RemoveAll(e.target);if e.backup!=""{_ = os.MkdirAll(filepath.Dir(e.target),0o755);_ = os.Rename(e.backup,e.target)}}}
-func(r *transactionRollback)finalize(){for _,e:=range r.entries{if e.backup!=""{_ = os.RemoveAll(e.backup)}}}
+type rollbackEntry struct {
+	target, backup string
+	created        bool
+}
+
+type transactionRollback struct {
+	entries []rollbackEntry
+}
+
+func (r *transactionRollback) rollback() error {
+	var failures []error
+	for i := len(r.entries) - 1; i >= 0; i-- {
+		e := r.entries[i]
+		if err := os.RemoveAll(e.target); err != nil {
+			failures = append(failures, fmt.Errorf("remove %s: %w", e.target, err))
+		}
+		if e.backup != "" {
+			if err := os.MkdirAll(filepath.Dir(e.target), 0o755); err != nil {
+				failures = append(failures, fmt.Errorf("recreate parent for %s: %w", e.target, err))
+				continue
+			}
+			if err := os.Rename(e.backup, e.target); err != nil {
+				failures = append(failures, fmt.Errorf("restore %s from %s: %w", e.target, e.backup, err))
+			}
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (r *transactionRollback) finalize() error {
+	var failures []error
+	for _, e := range r.entries {
+		if e.backup != "" {
+			if err := os.RemoveAll(e.backup); err != nil {
+				failures = append(failures, fmt.Errorf("remove rollback backup %s: %w", e.backup, err))
+			}
+		}
+	}
+	return errors.Join(failures...)
+}
 
 func (m *Manager) commitPackage(sp stagedPackage,db model.Database,rb *transactionRollback)error{
 	for _,e:=range sp.Manifest{
