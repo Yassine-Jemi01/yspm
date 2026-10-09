@@ -68,23 +68,34 @@ Environment:
 }
 
 func main() {
-	if len(os.Args) < 2 { usage(); return }
-	user := has(os.Args[2:], "--user")
-	arch := valueAfter(os.Args[2:], "--arch")
-	if arch == "" { arch = os.Getenv("YSPM_ARCH") }
-	if os.Getenv("YSPM_USER") == "1" { user = true }
-	m := manager.New(user, arch)
-
-	cmd := os.Args[1]
-	args := strip(os.Args[2:], "--user", "--snapshot", "-y", "--yes", "--background", "--arch")
-	if cmd == "__worker" {
-		if len(args) < 3 { fatal("invalid worker arguments") }
-		action,id := args[0],args[1]
-		packed:=""
-		if args[2]=="--"&&len(args)>3{packed=args[3]}
-		if err:=m.Worker(action,id,packed,true,has(os.Args[2:],"--snapshot"));err!=nil{fatal(err.Error())}
+	if len(os.Args) < 2 {
+		usage()
 		return
 	}
+	cmd := os.Args[1]
+	if cmd == "__worker" {
+		action, id, workerArgs, autoSnapshot, err := parseWorkerArgs(os.Args[2:])
+		if err != nil {
+			fatal(err.Error())
+		}
+		user := os.Getenv("YSPM_USER") == "1"
+		m := manager.New(user, os.Getenv("YSPM_ARCH"))
+		if err := m.Worker(action, id, workerArgs, true, autoSnapshot); err != nil {
+			fatal(err.Error())
+		}
+		return
+	}
+
+	user := has(os.Args[2:], "--user")
+	arch := valueAfter(os.Args[2:], "--arch")
+	if arch == "" {
+		arch = os.Getenv("YSPM_ARCH")
+	}
+	if os.Getenv("YSPM_USER") == "1" {
+		user = true
+	}
+	m := manager.New(user, arch)
+	args := strip(os.Args[2:], "--user", "--snapshot", "-y", "--yes", "--background", "--arch")
 
 	yes := has(os.Args[2:], "-y") || has(os.Args[2:], "--yes")
 	background := has(os.Args[2:], "--background")
@@ -230,11 +241,41 @@ func printInfo(p model.Package){
 	if len(p.Services)>0{fmt.Printf("Services: ");for i,s:=range p.Services{if i>0{fmt.Print(", ")};fmt.Print(s.Name)};fmt.Println()}
 }
 
+func parseWorkerArgs(raw []string) (action, id string, packages []string, autoSnapshot bool, err error) {
+	if len(raw) < 3 {
+		err = fmt.Errorf("invalid worker arguments")
+		return
+	}
+	action, id = raw[0], raw[1]
+	separator := -1
+	for i, token := range raw[2:] {
+		if token == "--" {
+			separator = i + 2
+			break
+		}
+		if token == "--snapshot" {
+			autoSnapshot = true
+			continue
+		}
+		if token == "--yes" || token == "-y" {
+			continue
+		}
+		err = fmt.Errorf("unsupported worker option %q", token)
+		return
+	}
+	if separator < 0 {
+		err = fmt.Errorf("worker arguments are missing the -- separator")
+		return
+	}
+	packages = append([]string(nil), raw[separator+1:]...)
+	return
+}
+
 func has(xs []string,want string)bool{for _,x:=range xs{if x==want{return true}};return false}
 
 func isLocalArchiveArg(a string) bool {
 	x:=strings.ToLower(strings.TrimSpace(a))
-	return strings.HasSuffix(x,".yspkg")||strings.HasSuffix(x,".tar")||strings.HasSuffix(x,".tar.gz")||strings.HasSuffix(x,".tgz")||strings.HasSuffix(x,".tar.xz")||strings.HasSuffix(x,".tar.zst")||strings.HasSuffix(x,".zip")
+	return strings.HasSuffix(x,".yspkg")||strings.HasSuffix(x,".zip")||strings.HasSuffix(x,".tar")||strings.HasSuffix(x,".tar.gz")||strings.HasSuffix(x,".tgz")||strings.HasSuffix(x,".tar.xz")||strings.HasSuffix(x,".tar.zst")||strings.HasSuffix(x,".tar.bz2")||strings.HasSuffix(x,".zip")
 }
 
 func valueAfter(xs []string,want string)string{for i,x:=range xs{if x==want&&i+1<len(xs){return xs[i+1]};if strings.HasPrefix(x,want+"="){return strings.TrimPrefix(x,want+"=")}};return ""}

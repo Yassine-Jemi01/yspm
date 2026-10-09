@@ -50,3 +50,30 @@ func TestIsLocalArchiveArgRecognizesZip(t *testing.T) {
 		t.Fatal("ZIP archives should be recognized as local archive arguments")
 	}
 }
+
+func TestParseWorkerArgsPreservesIndividualPackageArguments(t *testing.T) {
+	raw := []string{
+		"install", "tx-123", "--snapshot", "--",
+		"firefox", "./packages/my package.zip", "--snapshot", "--arch", "aarch64",
+	}
+	action, id, packages, snapshot, err := parseWorkerArgs(raw)
+	if err != nil {
+		t.Fatalf("parseWorkerArgs(): %v", err)
+	}
+	if action != "install" || id != "tx-123" {
+		t.Fatalf("worker identity = %q/%q, want install/tx-123", action, id)
+	}
+	want := []string{"firefox", "./packages/my package.zip", "--snapshot", "--arch", "aarch64"}
+	if !reflect.DeepEqual(packages, want) {
+		t.Fatalf("worker packages = %#v, want %#v", packages, want)
+	}
+	if !snapshot {
+		t.Fatal("snapshot flag before -- separator was not preserved")
+	}
+}
+
+func TestParseWorkerArgsRequiresSeparator(t *testing.T) {
+	if _, _, _, _, err := parseWorkerArgs([]string{"install", "tx-123", "firefox"}); err == nil {
+		t.Fatal("expected missing -- separator to be rejected")
+	}
+}
