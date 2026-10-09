@@ -904,7 +904,7 @@ func (m *Manager) RunBackground(action string, args []string, yes, autoSnapshot 
 	if err != nil {
 		return m.finishFailed(tx, fmt.Errorf("open transaction log: %w", err))
 	}
-	cmd := exec.Command(os.Args[0], backgroundWorkerArgs(action, tx.ID, args, autoSnapshot))
+	cmd := exec.Command(os.Args[0], backgroundWorkerArgs(action, tx.ID, args, autoSnapshot)...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Env = append(os.Environ(), "YSPM_USER="+boolText(m.User), "YSPM_ARCH="+m.arch)
