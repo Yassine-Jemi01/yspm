@@ -584,7 +584,9 @@ func copyNode(src, dst string) error {
 	}
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
 	if err != nil {
-		_ = in.Close()
+		if closeErr := in.Close(); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("close copy source: %w", closeErr))
+		}
 		return err
 	}
 	_, copyErr := io.Copy(out, in)
