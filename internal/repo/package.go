@@ -46,8 +46,11 @@ func openPackageTarReader(path string) (*boundedPackageTarReader, error) {
 	}
 	gr, err := gzip.NewReader(file)
 	if err != nil {
-		_ = file.Close()
-		return nil, fmt.Errorf("open package gzip stream: %w", err)
+		openErr := fmt.Errorf("open package gzip stream: %w", err)
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.Join(openErr, fmt.Errorf("close package archive: %w", closeErr))
+		}
+		return nil, openErr
 	}
 	limited := &io.LimitedReader{R: gr, N: maxTarStreamBytes + 1}
 	return &boundedPackageTarReader{
@@ -190,7 +193,7 @@ func ReadPackageData(path string) (out PackageData, retErr error) {
 	return out, nil
 }
 
-func ExtractPackage(path, destination string) error {
+func ExtractPackage(path, destination string) (retErr error) {
 	// The compressed archive is first expanded into a bounded private file and
 	// all headers/links are validated before any package-controlled file is made.
 	archive, err := spoolTarStream(path, "tar.gz")
@@ -199,8 +202,12 @@ func ExtractPackage(path, destination string) error {
 	}
 	defer func() {
 		name := archive.Name()
-		_ = archive.Close()
-		_ = os.Remove(name)
+		if closeErr := archive.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close validated package archive: %w", closeErr))
+		}
+		if removeErr := os.Remove(name); removeErr != nil && !os.IsNotExist(removeErr) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove validated package archive %s: %w", name, removeErr))
+		}
 	}()
 	entries, err := validateTarArchive(archive)
 	if err != nil {
@@ -308,11 +315,16 @@ func ExtractPackage(path, destination string) error {
 		_, copyErr := io.CopyN(out, reader, entry.size)
 		closeErr := out.Close()
 		if copyErr != nil {
-			_ = os.Remove(target)
-			return fmt.Errorf("extract package file %q: %w", rel, copyErr)
+			copyErr = fmt.Errorf("extract package file %q: %w", rel, copyErr)
+			if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+				copyErr = errors.Join(copyErr, fmt.Errorf("remove partial package file %s: %w", target, removeErr))
+			}
+			return copyErr
 		}
 		if closeErr != nil {
-			_ = os.Remove(target)
+			if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+				return errors.Join(closeErr, fmt.Errorf("remove incomplete package file %s: %w", target, removeErr))
+			}
 			return closeErr
 		}
 		if err := os.Chmod(target, os.FileMode(entry.mode)&0o777); err != nil {
@@ -414,7 +426,7 @@ func ListPackageFiles(path string) (out []model.FileEntry, retErr error) {
 	return out, nil
 }
 
-func BuildPackage(root, output string, p model.Package, scriptsDir string) error {
+func BuildPackage(root, output string, p model.Package, scriptsDir string) (retErr error) {
 	root = filepath.Clean(root)
 	info, err := os.Stat(root)
 	if err != nil || !info.IsDir() { return fmt.Errorf("package root is not a directory: %s", root) }
@@ -426,7 +438,10 @@ func BuildPackage(root, output string, p model.Package, scriptsDir string) error
 	p.Files, err = filesystemManifest(root)
 	if err != nil { return err }
 	if len(p.SharedRequires) == 0 || len(p.SharedProvides) == 0 {
-		req, prov := scanELFRequirements(root)
+		req, prov, scanErr := scanELFRequirements(root)
+		if scanErr != nil {
+			return fmt.Errorf("scan package ELF requirements: %w", scanErr)
+		}
 		if len(p.SharedRequires) == 0 { p.SharedRequires = req }
 		if len(p.SharedProvides) == 0 { p.SharedProvides = prov }
 	}
@@ -436,9 +451,29 @@ func BuildPackage(root, output string, p model.Package, scriptsDir string) error
 	tmp, err := os.CreateTemp(filepath.Dir(output), ".yspkg-*")
 	if err != nil { return err }
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
 	gw := gzip.NewWriter(tmp)
 	tw := tar.NewWriter(gw)
+	tarClosed, gzipClosed, fileClosed := false, false, false
+	defer func() {
+		if !tarClosed {
+			if closeErr := tw.Close(); closeErr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("close package tar writer: %w", closeErr))
+			}
+		}
+		if !gzipClosed {
+			if closeErr := gw.Close(); closeErr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("close package gzip writer: %w", closeErr))
+			}
+		}
+		if !fileClosed {
+			if closeErr := tmp.Close(); closeErr != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("close package temp file: %w", closeErr))
+			}
+		}
+		if removeErr := os.Remove(tmpPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove package temp file %s: %w", tmpPath, removeErr))
+		}
+	}()
 	metaHeader := &tar.Header{Name: "metadata.json", Mode: 0o644, Size: int64(len(data)), ModTime: time.Now()}
 	if err := tw.WriteHeader(metaHeader); err != nil { return err }
 	if _, err := tw.Write(data); err != nil { return err }
@@ -463,9 +498,12 @@ func BuildPackage(root, output string, p model.Package, scriptsDir string) error
 	err = addTree(tw, root, "root")
 	if err != nil { return err }
 	if err := tw.Close(); err != nil { return err }
+	tarClosed = true
 	if err := gw.Close(); err != nil { return err }
-	if err := tmp.Sync(); err != nil { _ = tmp.Close(); return err }
+	gzipClosed = true
+	if err := tmp.Sync(); err != nil { return err }
 	if err := tmp.Close(); err != nil { return err }
+	fileClosed = true
 	return os.Rename(tmpPath, output)
 }
 
@@ -541,14 +579,26 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func scanELFRequirements(root string) ([]string, []string) {
+func scanELFRequirements(root string) ([]string, []string, error) {
+	readelf, err := exec.LookPath("readelf")
+	if err != nil {
+		// ELF dependency discovery is optional on systems without binutils.
+		return nil, nil, nil
+	}
 	reqSet, provSet := map[string]bool{}, map[string]bool{}
-	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || !info.Mode().IsRegular() { return nil }
-		readelf, err := exec.LookPath("readelf")
-		if err != nil { return nil }
-		out, err := exec.Command(readelf, "-d", path).Output()
-		if err != nil { return nil }
+	walkErr := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info == nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		out, commandErr := exec.Command(readelf, "-d", path).Output()
+		if commandErr != nil {
+			// Most files are not ELF binaries, so readelf failure for an individual
+			// file is expected and is not a tree-walk failure.
+			return nil
+		}
 		for _, line := range strings.Split(string(out), "\n") {
 			if i := strings.Index(line, "NEEDED"); i >= 0 {
 				if j := strings.Index(line[i:], "["); j >= 0 {
@@ -565,11 +615,15 @@ func scanELFRequirements(root string) ([]string, []string) {
 		}
 		return nil
 	})
+	if walkErr != nil {
+		return nil, nil, walkErr
+	}
 	req, prov := make([]string,0,len(reqSet)), make([]string,0,len(provSet))
 	for v := range reqSet { req = append(req, v) }
 	for v := range provSet { prov = append(prov, v) }
-	sort.Strings(req); sort.Strings(prov)
-	return req, prov
+	sort.Strings(req)
+	sort.Strings(prov)
+	return req, prov, nil
 }
 
 func PackageSHA256(path string) (string, error) { return fileSHA256(path) }
