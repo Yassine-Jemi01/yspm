@@ -81,7 +81,7 @@ func (r *boundedPackageTarReader) Next() (*tar.Header, error) {
 		return nil, err
 	}
 	switch header.Typeflag {
-	case tar.TypeReg, tar.TypeReg:
+	case tar.TypeReg:
 		if r.expanded > maxTarExpandedBytes-header.Size {
 			return nil, fmt.Errorf("package archive exceeds %d-byte expanded-size limit", maxTarExpandedBytes)
 		}
@@ -164,7 +164,7 @@ func ReadPackageData(path string) (out PackageData, retErr error) {
 			break
 		}
 		switch {
-		case h.Name == "metadata.json" && (h.Typeflag == tar.TypeReg || h.Typeflag == tar.TypeReg):
+		case h.Name == "metadata.json" && (h.Typeflag == tar.TypeReg):
 			data, err := io.ReadAll(io.LimitReader(r.tar, (64<<20)+1))
 			if err != nil {
 				return PackageData{}, err
@@ -176,7 +176,7 @@ func ReadPackageData(path string) (out PackageData, retErr error) {
 				return PackageData{}, fmt.Errorf("invalid package metadata: %w", err)
 			}
 			metadataSeen = true
-		case strings.HasPrefix(h.Name, "scripts/") && (h.Typeflag == tar.TypeReg || h.Typeflag == tar.TypeReg):
+		case strings.HasPrefix(h.Name, "scripts/") && (h.Typeflag == tar.TypeReg):
 			data, err := io.ReadAll(io.LimitReader(r.tar, (8<<20)+1))
 			if err != nil {
 				return PackageData{}, err
@@ -410,7 +410,7 @@ func ListPackageFiles(path string) (out []model.FileEntry, retErr error) {
 				return nil, fmt.Errorf("unsafe package symlink %q: %w", rel, err)
 			}
 			entry.Type, entry.LinkTarget = "symlink", h.Linkname
-		case tar.TypeReg, tar.TypeReg:
+		case tar.TypeReg:
 			hash := sha256.New()
 			if _, err := io.CopyN(hash, r.tar, h.Size); err != nil {
 				return nil, err
