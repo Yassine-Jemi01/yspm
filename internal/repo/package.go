@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/Yassine-Jemi01/yspm/internal/model"
-	"github.com/Yassine-Jemi01/yspm/internal/pathutil"
 )
 
 const PackageFormat = "yspkg"
