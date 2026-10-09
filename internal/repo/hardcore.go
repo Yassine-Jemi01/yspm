@@ -3,6 +3,7 @@ package repo
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -112,12 +113,16 @@ func hardcoreListSource(source string) (string, string, error) {
 	return source, "file://" + filepath.ToSlash(filepath.Dir(source)), nil
 }
 
-func InspectHardcoreArchive(path string) (HardcorePackageData, error) {
+func InspectHardcoreArchive(path string) (result HardcorePackageData, retErr error) {
 	tmp, err := os.MkdirTemp("", "yspm-hardcore-*")
 	if err != nil {
 		return HardcorePackageData{}, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() {
+		if cleanupErr := os.RemoveAll(tmp); cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("remove temporary legacy extraction %s: %w", tmp, cleanupErr))
+		}
+	}()
 	if err := ExtractArchive(path, "tar", tmp); err != nil {
 		return HardcorePackageData{}, fmt.Errorf("extract legacy package: %w", err)
 	}
