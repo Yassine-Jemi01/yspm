@@ -1,8 +1,10 @@
 package repo
 
 import (
+	"archive/tar"
 	"archive/zip"
-	"bufio"
+	"compress/bzip2"
+	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -15,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -247,47 +250,515 @@ func writeAtomic(r io.Reader, destination string) error {
 	return os.Rename(tmpPath, destination)
 }
 
-func ExtractArchive(archivePath, format, destination string) error {
-	if err := os.MkdirAll(destination, 0o755); err != nil {
-		return err
+const (
+	maxTarEntries       = 100_000
+	maxTarEntryBytes    int64 = 4 << 30
+	maxTarExpandedBytes int64 = 8 << 30
+	maxTarStreamBytes         = maxTarExpandedBytes + (128 << 20)
+)
+
+type tarArchiveEntry struct {
+	name     string
+	typeflag byte
+	linkname string
+	size     int64
+	mode     int64
+}
+
+type tarReadCloser struct {
+	io.Reader
+	closers []io.Closer
+}
+
+func (r *tarReadCloser) Close() error {
+	var firstErr error
+	for _, c := range r.closers {
+		if err := c.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
-	switch strings.ToLower(format) {
+	return firstErr
+}
+
+type commandTarReadCloser struct {
+	io.ReadCloser
+	cmd   *exec.Cmd
+	input *os.File
+}
+
+func (r *commandTarReadCloser) Close() error {
+	pipeErr := r.ReadCloser.Close()
+	waitErr := r.cmd.Wait()
+	inputErr := r.input.Close()
+	if waitErr != nil {
+		return fmt.Errorf("%s decompressor failed: %w", filepath.Base(r.cmd.Path), waitErr)
+	}
+	if pipeErr != nil {
+		return pipeErr
+	}
+	return inputErr
+}
+
+func ExtractArchive(archivePath, format, destination string) error {
+	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "zip":
+		if err := os.MkdirAll(destination, 0o755); err != nil {
+			return err
+		}
 		return extractZip(archivePath, destination)
 	case "tar.gz", "tgz", "tar.xz", "tar.bz2", "tar.zst", "tar":
-		return extractTar(archivePath, destination)
+		return extractTar(archivePath, format, destination)
 	default:
 		return fmt.Errorf("unsupported archive format %q", format)
 	}
 }
 
-func validateTarList(out string) error {
-	s := bufio.NewScanner(strings.NewReader(out))
-	for s.Scan() {
-		name := strings.TrimSpace(s.Text())
-		name = strings.TrimPrefix(name, "./")
-		if name == "" {
-			continue
-		}
-		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") || strings.Contains(name, string(filepath.Separator)+"../") {
-			return fmt.Errorf("unsafe archive path %q", name)
-		}
+func openTarStream(archivePath, format string) (io.ReadCloser, error) {
+	file, err := os.Open(archivePath)
+	if err != nil {
+		return nil, err
 	}
-	return s.Err()
+
+	format = strings.ToLower(strings.TrimSpace(format))
+	compression := ""
+	switch format {
+	case "tar.gz", "tgz":
+		compression = "gzip"
+	case "tar.xz":
+		compression = "xz"
+	case "tar.bz2":
+		compression = "bzip2"
+	case "tar.zst":
+		compression = "zstd"
+	case "tar":
+		var magic [6]byte
+		_, _ = file.ReadAt(magic[:], 0)
+		switch {
+		case magic[0] == 0x1f && magic[1] == 0x8b:
+			compression = "gzip"
+		case string(magic[:3]) == "BZh":
+			compression = "bzip2"
+		case string(magic[:6]) == "\xfd7zXZ\x00":
+			compression = "xz"
+		case string(magic[:4]) == "\x28\xb5\x2f\xfd":
+			compression = "zstd"
+		}
+	default:
+		_ = file.Close()
+		return nil, fmt.Errorf("unsupported tar compression format %q", format)
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+
+	switch compression {
+	case "":
+		return file, nil
+	case "gzip":
+		reader, err := gzip.NewReader(file)
+		if err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("open gzip archive: %w", err)
+		}
+		return &tarReadCloser{Reader: reader, closers: []io.Closer{reader, file}}, nil
+	case "bzip2":
+		return &tarReadCloser{Reader: bzip2.NewReader(file), closers: []io.Closer{file}}, nil
+	case "xz", "zstd":
+		program := compressionProgram(compression)
+		cmd := exec.Command(program, "-dc")
+		cmd.Stdin = file
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := cmd.Start(); err != nil {
+			_ = stdout.Close()
+			_ = file.Close()
+			return nil, fmt.Errorf("start %s decompressor: %w", program, err)
+		}
+		return &commandTarReadCloser{ReadCloser: stdout, cmd: cmd, input: file}, nil
+	default:
+		_ = file.Close()
+		return nil, fmt.Errorf("unsupported tar compression %q", compression)
+	}
 }
 
-func extractTar(archivePath, destination string) error {
-	list := exec.Command("tar", "-tf", archivePath)
-	out, err := list.Output()
-	if err != nil {
-		return fmt.Errorf("list tar archive: %w", err)
+func compressionProgram(compression string) string {
+	if compression == "xz" {
+		return "xz"
 	}
-	if err := validateTarList(string(out)); err != nil {
+	return "zstd"
+}
+
+// spoolTarStream decompresses to a private temporary file before validation and
+// extraction. Both passes therefore inspect the exact same bytes, preventing a
+// source archive from being swapped between the validation and extraction pass.
+func spoolTarStream(archivePath, format string) (*os.File, error) {
+	source, err := openTarStream(archivePath, format)
+	if err != nil {
+		return nil, err
+	}
+
+	tmp, err := os.CreateTemp("", "yspm-validated-tar-*.tar")
+	if err != nil {
+		_ = source.Close()
+		return nil, err
+	}
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}
+
+	n, copyErr := io.Copy(tmp, io.LimitReader(source, maxTarStreamBytes+1))
+	closeErr := source.Close()
+	if n > maxTarStreamBytes {
+		cleanup()
+		return nil, fmt.Errorf("decompressed tar stream exceeds the %d-byte limit", maxTarStreamBytes)
+	}
+	if copyErr != nil {
+		cleanup()
+		if closeErr != nil {
+			return nil, fmt.Errorf("read tar stream: %v; close decompressor: %w", copyErr, closeErr)
+		}
+		return nil, fmt.Errorf("read tar stream: %w", copyErr)
+	}
+	if closeErr != nil {
+		cleanup()
+		return nil, closeErr
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, err
+	}
+	return tmp, nil
+}
+
+func normalizeTarPath(name string) (string, error) {
+	if name == "" || strings.ContainsRune(name, '\x00') {
+		return "", fmt.Errorf("unsafe empty or NUL-containing archive path %q", name)
+	}
+	// Backslashes and drive-qualified names are rejected so the same archive
+	// cannot become an absolute/traversal path on another supported host OS.
+	if strings.Contains(name, "\\") || isDriveQualifiedPath(name) || pathpkg.IsAbs(name) {
+		return "", fmt.Errorf("unsafe archive path %q", name)
+	}
+	clean := pathpkg.Clean(name)
+	if clean == ".." || strings.HasPrefix(clean, "../") || pathpkg.IsAbs(clean) {
+		return "", fmt.Errorf("unsafe archive path %q", name)
+	}
+	return clean, nil
+}
+
+func isDriveQualifiedPath(name string) bool {
+	return len(name) >= 2 &&
+		((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) &&
+		name[1] == ':'
+}
+
+func safeSymlinkTarget(name, target string) error {
+	if target == "" || strings.ContainsRune(target, '\x00') ||
+		strings.Contains(target, "\\") || isDriveQualifiedPath(target) || pathpkg.IsAbs(target) {
+		return fmt.Errorf("unsafe symlink target %q for %q", target, name)
+	}
+	resolved := pathpkg.Clean(pathpkg.Join(pathpkg.Dir(name), target))
+	if resolved == ".." || strings.HasPrefix(resolved, "../") || pathpkg.IsAbs(resolved) {
+		return fmt.Errorf("symlink %q escapes extraction root through target %q", name, target)
+	}
+	return nil
+}
+
+func validateTarArchive(file *os.File) ([]tarArchiveEntry, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	reader := tar.NewReader(file)
+	entries := make([]tarArchiveEntry, 0, 128)
+	byName := make(map[string]tarArchiveEntry)
+	var expandedBytes int64
+
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read tar headers: %w", err)
+		}
+		if len(entries) >= maxTarEntries {
+			return nil, fmt.Errorf("tar archive exceeds the %d-entry limit", maxTarEntries)
+		}
+		if header.Size < 0 {
+			return nil, fmt.Errorf("negative size for archive entry %q", header.Name)
+		}
+
+		name, err := normalizeTarPath(header.Name)
+		if err != nil {
+			return nil, err
+		}
+		entry := tarArchiveEntry{
+			name:     name,
+			typeflag: header.Typeflag,
+			linkname: header.Linkname,
+			size:     header.Size,
+			mode:     header.Mode,
+		}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if header.Size != 0 {
+				return nil, fmt.Errorf("directory entry %q has unexpected data", header.Name)
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if name == "." {
+				return nil, fmt.Errorf("regular file entry cannot name extraction root")
+			}
+			if header.Size > maxTarEntryBytes {
+				return nil, fmt.Errorf("archive entry %q exceeds the %d-byte per-file limit", name, maxTarEntryBytes)
+			}
+			if expandedBytes > maxTarExpandedBytes-header.Size {
+				return nil, fmt.Errorf("tar archive exceeds the %d-byte expanded-size limit", maxTarExpandedBytes)
+			}
+			expandedBytes += header.Size
+		case tar.TypeSymlink:
+			if name == "." || header.Size != 0 {
+				return nil, fmt.Errorf("invalid symlink entry %q", header.Name)
+			}
+			if err := safeSymlinkTarget(name, header.Linkname); err != nil {
+				return nil, err
+			}
+		case tar.TypeLink:
+			if name == "." || header.Size != 0 {
+				return nil, fmt.Errorf("invalid hardlink entry %q", header.Name)
+			}
+			linkTarget, err := normalizeTarPath(header.Linkname)
+			if err != nil || linkTarget == "." {
+				return nil, fmt.Errorf("unsafe hardlink target %q for %q", header.Linkname, name)
+			}
+			entry.linkname = linkTarget
+		default:
+			return nil, fmt.Errorf("unsupported tar entry type %q for %s", header.Typeflag, header.Name)
+		}
+
+		if name == "." && header.Typeflag != tar.TypeDir {
+			return nil, fmt.Errorf("only a directory may name the extraction root")
+		}
+		if _, duplicate := byName[name]; duplicate {
+			return nil, fmt.Errorf("duplicate archive path %q", name)
+		}
+		byName[name] = entry
+		entries = append(entries, entry)
+	}
+
+	for _, entry := range entries {
+		if entry.name == "." {
+			continue
+		}
+		for parent := pathpkg.Dir(entry.name); parent != "." && parent != "/"; parent = pathpkg.Dir(parent) {
+			if parentEntry, ok := byName[parent]; ok && parentEntry.typeflag != tar.TypeDir {
+				return nil, fmt.Errorf("archive path %q is nested beneath non-directory entry %q", entry.name, parent)
+			}
+		}
+		if entry.typeflag == tar.TypeLink {
+			target, ok := byName[entry.linkname]
+			if !ok || (target.typeflag != tar.TypeReg && target.typeflag != tar.TypeRegA) {
+				return nil, fmt.Errorf("hardlink %q must target a regular file in the same archive", entry.name)
+			}
+		}
+	}
+	return entries, nil
+}
+
+func prepareTarDestination(destination string) (string, error) {
+	root, err := filepath.Abs(destination)
+	if err != nil {
+		return "", err
+	}
+	root = filepath.Clean(root)
+	info, err := os.Lstat(root)
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return "", err
+		}
+		info, err = os.Lstat(root)
+	}
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return "", fmt.Errorf("tar extraction destination must be a real directory, not a symlink: %s", root)
+	}
+	return root, nil
+}
+
+// ensureTarDirectories creates every component below root without following
+// symlinks. This is checked again at write time in addition to archive-wide
+// validation, so pre-existing symlinks in a destination cannot redirect writes.
+func ensureTarDirectories(root, relative string) (string, error) {
+	if relative == "" || relative == "." {
+		return root, nil
+	}
+	clean, err := normalizeTarPath(relative)
+	if err != nil {
+		return "", err
+	}
+	current := root
+	for _, component := range strings.Split(clean, "/") {
+		if component == "" || component == "." {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if os.IsNotExist(err) {
+			if mkdirErr := os.Mkdir(current, 0o755); mkdirErr != nil && !os.IsExist(mkdirErr) {
+				return "", mkdirErr
+			}
+			info, err = os.Lstat(current)
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", fmt.Errorf("unsafe non-directory path component %q in extraction destination", current)
+		}
+	}
+	return current, nil
+}
+
+func extractTar(archivePath, format, destination string) error {
+	// Decompress once into a bounded private file, then validate all members
+	// before creating any archive-controlled filesystem entries.
+	archive, err := spoolTarStream(archivePath, format)
+	if err != nil {
+		return fmt.Errorf("prepare tar archive: %w", err)
+	}
+	defer func() {
+		name := archive.Name()
+		_ = archive.Close()
+		_ = os.Remove(name)
+	}()
+
+	entries, err := validateTarArchive(archive)
+	if err != nil {
 		return err
 	}
-	cmd := exec.Command("tar", "-xf", archivePath, "-C", destination)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("extract tar: %w: %s", err, strings.TrimSpace(string(out)))
+	root, err := prepareTarDestination(destination)
+	if err != nil {
+		return err
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	reader := tar.NewReader(archive)
+	entryIndex := 0
+	var directoryEntries []tarArchiveEntry
+	var hardlinks []tarArchiveEntry
+	var symlinks []tarArchiveEntry
+
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read tar during extraction: %w", err)
+		}
+		if entryIndex >= len(entries) {
+			return fmt.Errorf("tar archive changed between validation and extraction")
+		}
+		entry := entries[entryIndex]
+		entryIndex++
+		if entry.name == "." {
+			continue
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if _, err := ensureTarDirectories(root, entry.name); err != nil {
+				return err
+			}
+			directoryEntries = append(directoryEntries, entry)
+		case tar.TypeReg, tar.TypeRegA:
+			parent, err := ensureTarDirectories(root, pathpkg.Dir(entry.name))
+			if err != nil {
+				return err
+			}
+			target := filepath.Join(parent, filepath.Base(filepath.FromSlash(entry.name)))
+			out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				return fmt.Errorf("create archive file %q: %w", entry.name, err)
+			}
+			_, copyErr := io.CopyN(out, reader, entry.size)
+			closeErr := out.Close()
+			if copyErr != nil {
+				_ = os.Remove(target)
+				return fmt.Errorf("extract archive file %q: %w", entry.name, copyErr)
+			}
+			if closeErr != nil {
+				_ = os.Remove(target)
+				return closeErr
+			}
+			if err := os.Chmod(target, os.FileMode(entry.mode)&0o777); err != nil {
+				return err
+			}
+		case tar.TypeLink:
+			hardlinks = append(hardlinks, entry)
+		case tar.TypeSymlink:
+			symlinks = append(symlinks, entry)
+		default:
+			return fmt.Errorf("unsupported tar entry type %q for %s", header.Typeflag, header.Name)
+		}
+	}
+	if entryIndex != len(entries) {
+		return fmt.Errorf("tar archive entry count changed between validation and extraction")
+	}
+
+	// Link creation is deferred until all regular files exist. No archive member
+	// may be nested under a symlink, as enforced by validateTarArchive.
+	for _, entry := range hardlinks {
+		parent, err := ensureTarDirectories(root, pathpkg.Dir(entry.name))
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(parent, filepath.Base(filepath.FromSlash(entry.name)))
+		sourceParent, err := ensureTarDirectories(root, pathpkg.Dir(entry.linkname))
+		if err != nil {
+			return err
+		}
+		source := filepath.Join(sourceParent, filepath.Base(filepath.FromSlash(entry.linkname)))
+		info, err := os.Lstat(source)
+		if err != nil {
+			return fmt.Errorf("hardlink source %q: %w", entry.linkname, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("hardlink source %q is not a regular file", entry.linkname)
+		}
+		if err := os.Link(source, target); err != nil {
+			return fmt.Errorf("create hardlink %q: %w", entry.name, err)
+		}
+	}
+	for _, entry := range symlinks {
+		parent, err := ensureTarDirectories(root, pathpkg.Dir(entry.name))
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(parent, filepath.Base(filepath.FromSlash(entry.name)))
+		if err := os.Symlink(entry.linkname, target); err != nil {
+			return fmt.Errorf("create symlink %q: %w", entry.name, err)
+		}
+	}
+
+	// Set archived directory modes only after all writes have completed, so
+	// read-only modes cannot block extraction of their children.
+	sort.Slice(directoryEntries, func(i, j int) bool {
+		return strings.Count(directoryEntries[i].name, "/") > strings.Count(directoryEntries[j].name, "/")
+	})
+	for _, entry := range directoryEntries {
+		target := filepath.Join(root, filepath.FromSlash(entry.name))
+		if err := os.Chmod(target, os.FileMode(entry.mode)&0o777); err != nil {
+			return err
+		}
 	}
 	return nil
 }
