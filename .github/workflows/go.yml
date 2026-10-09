@@ -13,10 +13,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
-      - name: Resolve pinned VS Code checksum (temporary)
-        run: |
-          response="$(curl --fail --silent --show-error "https://update.code.visualstudio.com/api/update/linux-x64/stable/latest")"
-          echo "$response" | jq '{name,version,productVersion,sha256hash,url}'
       - name: Test
         run: go test ./...
       - name: Build
