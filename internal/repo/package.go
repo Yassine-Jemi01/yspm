@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -30,6 +31,46 @@ type PackageData struct {
 	Scripts  map[string]string
 }
 
+func accountPackageTarHeader(header *tar.Header, count *int, total *int64) error {
+	*count++
+	if *count > maxTarEntries {
+		return fmt.Errorf("package archive exceeds the %d-entry limit", maxTarEntries)
+	}
+	if header.Size < 0 || header.Size > maxTarEntryBytes {
+		return fmt.Errorf("package entry %q has invalid or excessive size %d", header.Name, header.Size)
+	}
+	if *total > maxTarExpandedBytes-header.Size {
+		return fmt.Errorf("package archive exceeds the %d-byte expanded-size limit", maxTarExpandedBytes)
+	}
+	*total += header.Size
+	return nil
+}
+
+func validatePackageArchiveLinks(entries []tarArchiveEntry) error {
+	for _, entry := range entries {
+		isPayload := strings.HasPrefix(entry.name, "root/")
+		if entry.typeflag != tar.TypeSymlink && entry.typeflag != tar.TypeLink {
+			continue
+		}
+		if !isPayload {
+			return fmt.Errorf("links are only allowed inside the root payload: %q", entry.name)
+		}
+		rel := strings.TrimPrefix(entry.name, "root/")
+		if rel == "" {
+			return fmt.Errorf("invalid link at package payload root")
+		}
+		if entry.typeflag == tar.TypeSymlink {
+			if err := safeSymlinkTarget(rel, entry.linkname); err != nil {
+				return fmt.Errorf("unsafe package symlink %q: %w", entry.name, err)
+			}
+		}
+		if entry.typeflag == tar.TypeLink && !strings.HasPrefix(entry.linkname, "root/") {
+			return fmt.Errorf("package hardlink %q targets a path outside root payload", entry.name)
+		}
+	}
+	return nil
+}
+
 func ReadPackageMetadata(path string) (model.Package, error) {
 	f, err := os.Open(path)
 	if err != nil { return model.Package{}, err }
@@ -38,12 +79,16 @@ func ReadPackageMetadata(path string) (model.Package, error) {
 	if err != nil { return model.Package{}, fmt.Errorf("open package: %w", err) }
 	defer gr.Close()
 	tr := tar.NewReader(gr)
+	count := 0
+	var expanded int64
 	for {
 		h, err := tr.Next()
 		if err == io.EOF { break }
 		if err != nil { return model.Package{}, err }
+		if err := accountPackageTarHeader(h, &count, &expanded); err != nil { return model.Package{}, err }
 		if h.Name == "metadata.json" {
-			data, err := io.ReadAll(io.LimitReader(tr, 64<<20))
+			if h.Size > 64<<20 { return model.Package{}, fmt.Errorf("package metadata exceeds the 64 MiB limit") }
+			data, err := io.ReadAll(io.LimitReader(tr, (64<<20)+1))
 			if err != nil { return model.Package{}, err }
 			var p model.Package
 			if err := json.Unmarshal(data, &p); err != nil { return model.Package{}, fmt.Errorf("invalid package metadata: %w", err) }
@@ -62,17 +107,22 @@ func ReadPackageData(path string) (PackageData, error) {
 	defer gr.Close()
 	tr := tar.NewReader(gr)
 	out := PackageData{Scripts: map[string]string{}}
+	count := 0
+	var expanded int64
 	for {
 		h, err := tr.Next()
 		if err == io.EOF { break }
 		if err != nil { return PackageData{}, err }
+		if err := accountPackageTarHeader(h, &count, &expanded); err != nil { return PackageData{}, err }
 		switch {
 		case h.Name == "metadata.json":
-			data, err := io.ReadAll(io.LimitReader(tr, 64<<20))
+			if h.Size > 64<<20 { return PackageData{}, fmt.Errorf("package metadata exceeds the 64 MiB limit") }
+			data, err := io.ReadAll(io.LimitReader(tr, (64<<20)+1))
 			if err != nil { return PackageData{}, err }
 			if err := json.Unmarshal(data, &out.Metadata); err != nil { return PackageData{}, err }
 		case strings.HasPrefix(h.Name, "scripts/") && h.Typeflag == tar.TypeReg:
-			data, err := io.ReadAll(io.LimitReader(tr, 8<<20))
+			if h.Size > 8<<20 { return PackageData{}, fmt.Errorf("package script %q exceeds the 8 MiB limit", h.Name) }
+			data, err := io.ReadAll(io.LimitReader(tr, (8<<20)+1))
 			if err != nil { return PackageData{}, err }
 			out.Scripts[strings.TrimPrefix(h.Name, "scripts/")] = string(data)
 		}
@@ -82,19 +132,42 @@ func ReadPackageData(path string) (PackageData, error) {
 }
 
 func ExtractPackage(path, destination string) error {
-	f, err := os.Open(path)
-	if err != nil { return err }
-	defer f.Close()
-	gr, err := gzip.NewReader(f)
-	if err != nil { return err }
-	defer gr.Close()
-	tr := tar.NewReader(gr)
+	archive, err := spoolTarStream(path, "tar.gz")
+	if err != nil {
+		return fmt.Errorf("read package archive: %w", err)
+	}
+	defer func() {
+		name := archive.Name()
+		if err := archive.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "yspm: close package archive: %v\n", err)
+		}
+		if err := os.Remove(name); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "yspm: remove temporary package archive: %v\n", err)
+		}
+	}()
+	entries, err := validateTarArchive(archive)
+	if err != nil {
+		return fmt.Errorf("validate package archive: %w", err)
+	}
+	if err := validatePackageArchiveLinks(entries); err != nil {
+		return err
+	}
 	root := filepath.Clean(destination)
-	if err := os.MkdirAll(root, 0o755); err != nil { return err }
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	tr := tar.NewReader(archive)
 	for {
 		h, err := tr.Next()
-		if err == io.EOF { break }
-		if err != nil { return err }
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
 		name := filepath.ToSlash(h.Name)
 		if name == "." || name == "" || name == "metadata.json" || strings.HasPrefix(name, "scripts/") {
 			continue
@@ -108,28 +181,53 @@ func ExtractPackage(path, destination string) error {
 			return fmt.Errorf("unsafe package path %q", h.Name)
 		}
 		target := filepath.Join(root, rel)
-		if !withinRoot(root, target) { return fmt.Errorf("package escapes destination: %q", h.Name) }
+		if !withinRoot(root, target) {
+			return fmt.Errorf("package escapes destination: %q", h.Name)
+		}
 		switch h.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, os.FileMode(h.Mode)); err != nil { return err }
-			_ = os.Chmod(target, os.FileMode(h.Mode))
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
 		case tar.TypeReg, tar.TypeRegA:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { return err }
-			out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, os.FileMode(h.Mode))
-			if err != nil { return err }
-			_, cpErr := io.Copy(out, tr)
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if err != nil {
+				return err
+			}
+			_, copyErr := io.CopyN(out, tr, h.Size)
 			closeErr := out.Close()
-			if cpErr != nil { return cpErr }
-			if closeErr != nil { return closeErr }
-			_ = os.Chmod(target, os.FileMode(h.Mode))
+			if copyErr != nil {
+				_ = os.Remove(target)
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			if err := os.Chmod(target, os.FileMode(h.Mode)&0o777); err != nil {
+				return err
+			}
 		case tar.TypeSymlink:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil { return err }
-			_ = os.Remove(target)
-			if err := os.Symlink(h.Linkname, target); err != nil { return err }
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := os.Symlink(h.Linkname, target); err != nil {
+				return err
+			}
 		case tar.TypeLink:
-			link := filepath.Clean(filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(h.Linkname, "root/"))))
-			if !withinRoot(root, link) { return fmt.Errorf("hardlink escapes destination: %q", h.Linkname) }
-			if err := os.Link(link, target); err != nil { return err }
+			linkName := strings.TrimPrefix(filepath.ToSlash(h.Linkname), "root/")
+			link := filepath.Clean(filepath.Join(root, filepath.FromSlash(linkName)))
+			if !withinRoot(root, link) {
+				return fmt.Errorf("hardlink escapes destination: %q", h.Linkname)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return err
+			}
+			if err := os.Link(link, target); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("unsupported tar entry type %q for %s", h.Typeflag, h.Name)
 		}
@@ -146,13 +244,19 @@ func ListPackageFiles(path string) ([]model.FileEntry, error) {
 	defer gr.Close()
 	tr := tar.NewReader(gr)
 	var out []model.FileEntry
+	count := 0
+	var expanded int64
 	for {
 		h, err := tr.Next()
 		if err == io.EOF { break }
 		if err != nil { return nil, err }
+		if err := accountPackageTarHeader(h, &count, &expanded); err != nil { return nil, err }
 		if !strings.HasPrefix(h.Name, "root/") || h.Name == "root/" { continue }
 		rel := filepath.ToSlash(strings.TrimPrefix(h.Name, "root/"))
 		entry := model.FileEntry{Path: rel, Mode: uint32(h.Mode)}
+		if h.Typeflag == tar.TypeSymlink {
+			if err := safeSymlinkTarget(rel, h.Linkname); err != nil { return nil, err }
+		}
 		switch h.Typeflag {
 		case tar.TypeDir:
 			entry.Type = "dir"
