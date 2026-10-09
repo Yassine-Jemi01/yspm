@@ -313,14 +313,23 @@ func matchesNameOrProvide(p model.Package,want string)bool{
 	return false
 }
 
-func parseDependency(s string)dependencyRequest{
-	s=strings.TrimSpace(s);arch:=""
-	if i:=strings.LastIndex(s,":");i>0&&!strings.Contains(s[i+1:],"/"){arch=config.NormalizeArch(s[i+1:]);s=s[:i]}
-	op,ver:=parseConstraint(s);name:=s
-	if op!=""{
-		idx:=strings.Index(s,op);name=strings.TrimSpace(s[:idx]);ver=strings.TrimSpace(s[idx+len(op):])
+func parseDependency(s string) dependencyRequest {
+	s = strings.TrimSpace(s)
+	op, version := parseConstraint(s)
+	name := s
+	if op != "" {
+		operatorAt := strings.Index(s, op)
+		name = strings.TrimSpace(s[:operatorAt])
+		version = strings.TrimSpace(s[operatorAt+len(op):])
 	}
-	return dependencyRequest{Name:name,Op:op,Version:ver,Arch:arch}
+	arch := ""
+	// Parse architecture only from the package-name portion. A colon in the
+	// version portion can be an epoch separator (for example >=1:2.0).
+	if i := strings.LastIndex(name, ":"); i > 0 && !strings.Contains(name[i+1:], "/") {
+		arch = config.NormalizeArch(name[i+1:])
+		name = strings.TrimSpace(name[:i])
+	}
+	return dependencyRequest{Name: name, Op: op, Version: version, Arch: arch}
 }
 func parseConstraint(s string)(string,string){
 	for _,op:=range []string{"!=",">=","<=","=","<",">"}{if i:=strings.Index(s,op);i>0{return op,strings.TrimSpace(s[i+len(op):])}}
