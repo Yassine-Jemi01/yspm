@@ -129,11 +129,18 @@ func NormalizeArch(a string) string {
 func HostOS() string { return runtime.GOOS }
 func HostArch() string { return NormalizeArch(runtime.GOARCH) }
 
-func CacheDir() (string,error) {
-	user := os.Geteuid() != 0
+// CacheDirFor uses the same explicit system/user mode as the package
+// manager. Effective UID is not a reliable proxy when running "sudo yspm --user".
+func CacheDirFor(user bool) (string, error) {
 	p, err := NewPaths(user)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	return p.Cache, nil
+}
+
+func CacheDir() (string, error) {
+	return CacheDirFor(os.Geteuid() != 0)
 }
 func DataDir() (string,error) {
 	user := os.Geteuid() != 0
