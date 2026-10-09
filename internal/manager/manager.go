@@ -206,25 +206,24 @@ func (m *Manager) runTransaction(action string,requested []string,yes,upgrade,au
 		if autoSnapshot&&!m.User{
 			snapshotID,_=CreateSnapshot(m)
 		}
-		tx:=m.startTransaction(action,namesFromPackages(plan.Packages),snapshotID)
+		tx, err := m.startTransaction(action,namesFromPackages(plan.Packages),snapshotID); if err != nil { return err }
 		staged,err:=m.prepare(plan.Packages)
 		if err!=nil{return m.finishFailed(tx,err)}
 		defer cleanupStaged(staged)
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		rollback:=&transactionRollback{}
 		for _,sp:=range staged{
-			if err:=m.runScript(sp,"preinstall");err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
-			if err:=m.commitPackage(sp,db,rollback);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
+			if err:=m.runScript(sp,"preinstall");err!=nil{return m.finishFailedWithRollback(tx, rollback, err)}
+			if err:=m.commitPackage(sp,db,rollback);err!=nil{return m.finishFailedWithRollback(tx, rollback, err)}
 			hook:="postinstall";if sp.HardcoreLegacy{hook="install"}
-			if err:=m.runScript(sp,hook);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
-			if err:=ApplyServices(m,sp.Pkg);err!=nil{rollback.rollback();return m.finishFailed(tx,err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
+			if err:=m.runScript(sp,hook);err!=nil{return m.finishFailedWithRollback(tx, rollback, err)}
+			if err:=ApplyServices(m,sp.Pkg);err!=nil{return m.finishFailedWithRollback(tx, rollback, err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{return m.finishFailedWithRollback(tx, rollback, err)}
 			installed:=m.installedFromStage(sp)
 			installed.Explicit=containsName(plan.Requested,sp.Pkg.Name)||installed.Explicit
 			db.Packages[sp.Pkg.Name]=installed
 		}
-		if err:=m.saveDatabasePreservingHistory(db);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
-		rollback.finalize()
-		return m.finishSuccess(tx)
+		if err:=store.SaveDBFor(m.User,db);err!=nil{return m.finishFailedWithRollback(tx, rollback, err)}
+		return m.finishCommitted(tx, rollback.finalize())
 	})
 }
 
@@ -513,22 +512,22 @@ func (m *Manager) RemoveMany(names []string,yes,autoSnapshot bool)error{
 		}
 		if !yes{fmt.Printf("Remove %s? [y/N] ",strings.Join(names,", "));if !confirm(""){fmt.Println("Aborted.");return nil}}
 		if autoSnapshot&&!m.User{_,_=CreateSnapshot(m)}
-		tx:=m.startTransaction("remove",names,"")
+		tx, err := m.startTransaction("remove",names,""); if err != nil { return err }
 		rb:=&transactionRollback{}
 		for _,name:=range names{
 			p:=db.Packages[name]
 			if p.Format==repo.HardcorePackageFormat {
 				if err:=m.runInstalledHook(p,"uninstall");err!=nil{return m.finishFailed(tx,err)}
 			} else if err:=m.runInstalledHook(p,"preremove");err!=nil{return m.finishFailed(tx,err)}
-			if err:=RemovePackageFiles(m,p,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-			if err:=DisableServices(m,p.Services);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+			if err:=RemovePackageFiles(m,p,rb);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
+			if err:=DisableServices(m,p.Services);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
 			if p.Format!=repo.HardcorePackageFormat {
-				if err:=m.runInstalledHook(p,"postremove");err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+				if err:=m.runInstalledHook(p,"postremove");err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
 			}
 			delete(db.Packages,name)
 		}
-		if err:=m.saveDatabasePreservingHistory(db);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-				rb.finalize();return m.finishSuccess(tx)
+		if err:=store.SaveDBFor(m.User,db);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
+				return m.finishCommitted(tx, rb.finalize())
 	})
 }
 
@@ -608,12 +607,12 @@ func (m *Manager) UpgradeRelease(release string,yes,autoSnapshot bool)error{
 		if !yes{fmt.Printf("Upgrade release %s -> %s? [y/N] ",db.Release,release);if !confirm(""){return nil}}
 		plan,err:=m.resolve(idx,db,nil,true);if err!=nil{return fmt.Errorf("release resolution failed: %w",err)}
 		oldRepo:=m.repository;m.repository=url;defer func(){m.repository=oldRepo}()
-		tx:=m.startTransaction("release-upgrade",namesFromPackages(plan.Packages),"")
+		tx, err := m.startTransaction("release-upgrade",namesFromPackages(plan.Packages),""); if err != nil { return err }
 		rb:=&transactionRollback{};if autoSnapshot&&!m.User{_,_=CreateSnapshot(m)}
 		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer cleanupStaged(staged)
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
-		for _,sp:=range staged{if err:=m.commitPackage(sp,db,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)};db.Packages[sp.Pkg.Name]=m.installedFromStage(sp)}
-		db.Release,db.ABI=idx.Release,idx.ABI;if err:=m.saveDatabasePreservingHistory(db);err!=nil{rb.rollback();return m.finishFailed(tx,err)};rb.finalize();_=repo.CacheIndex(idx);return m.finishSuccess(tx)
+		for _,sp:=range staged{if err:=m.commitPackage(sp,db,rb);err!=nil{return m.finishFailedWithRollback(tx, rb, err)};db.Packages[sp.Pkg.Name]=m.installedFromStage(sp)}
+		db.Release,db.ABI=idx.Release,idx.ABI;if err:=store.SaveDBFor(m.User,db);err!=nil{return m.finishFailedWithRollback(tx, rb, err)};return m.finishCommitted(tx, rb.finalize())
 	})
 }
 
@@ -635,29 +634,51 @@ func (m *Manager) RepoIndex(dir,output,baseURL,release,abi string)error{_,err:=r
 func (m *Manager) RepoSign(index,key,sig string)error{return repo.SignRepositoryIndex(index,key,sig)}
 func (m *Manager) GenerateKey(pub,priv string)error{return repo.GenerateKeypair(pub,priv)}
 
-// saveDatabasePreservingHistory merges the latest transaction and snapshot records
-// into a transaction's in-memory package database before persisting it. The
-// transaction was recorded separately by startTransaction, so saving an older
-// in-memory database must not erase that newly-created history entry.
-func (m *Manager) saveDatabasePreservingHistory(db model.Database) error {
-	latest, err := store.LoadDBFor(m.User)
-	if err != nil {
-		return err
+func (m *Manager) startTransaction(action string, packages []string, snapshot string) (model.Transaction, error) {
+	tx := model.Transaction{ID: newID(), StartedAt: time.Now(), Action: action, Packages: packages, Status: "running", SnapshotBefore: snapshot}
+	if err := store.AddTransactionFor(m.User, tx); err != nil {
+		return model.Transaction{}, fmt.Errorf("record transaction start: %w", err)
 	}
-	db.Transactions = latest.Transactions
-	db.Snapshots = latest.Snapshots
-	return store.SaveDBFor(m.User, db)
+	return tx, nil
 }
 
-func (m *Manager) startTransaction(action string,packages []string,snapshot string)model.Transaction{
-	tx:=model.Transaction{ID:newID(),StartedAt:time.Now(),Action:action,Packages:packages,Status:"running",SnapshotBefore:snapshot};_ = store.AddTransactionFor(m.User,tx);return tx
+func (m *Manager) finishSuccess(tx model.Transaction) error {
+	tx.Status = "success"
+	tx.FinishedAt = time.Now()
+	if err := store.UpdateTransactionFor(m.User, tx); err != nil {
+		return fmt.Errorf("transaction committed but failed to record success: %w", err)
+	}
+	return nil
 }
-func(m *Manager)finishSuccess(tx model.Transaction)error{tx.Status="success";tx.FinishedAt=time.Now();return store.UpdateTransactionFor(m.User,tx)}
-func(m *Manager)finishFailed(tx model.Transaction,err error)error{tx.Status="failed";tx.Error=err.Error();tx.FinishedAt=time.Now();_=store.UpdateTransactionFor(m.User,tx);return err}
+
+func (m *Manager) finishFailed(tx model.Transaction, cause error) error {
+	tx.Status = "failed"
+	tx.Error = cause.Error()
+	tx.FinishedAt = time.Now()
+	if err := store.UpdateTransactionFor(m.User, tx); err != nil {
+		return errors.Join(cause, fmt.Errorf("also failed to record transaction failure: %w", err))
+	}
+	return cause
+}
+
+func (m *Manager) finishFailedWithRollback(tx model.Transaction, rb *transactionRollback, cause error) error {
+	if err := rb.rollback(); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("rollback failed: %w", err))
+	}
+	return m.finishFailed(tx, cause)
+}
+
+func (m *Manager) finishCommitted(tx model.Transaction, cleanupErr error) error {
+	statusErr := m.finishSuccess(tx)
+	if cleanupErr != nil {
+		return errors.Join(fmt.Errorf("transaction committed but rollback backup cleanup failed: %w", cleanupErr), statusErr)
+	}
+	return statusErr
+}
 
 func (m *Manager) RunBackground(action string,args []string,yes,autoSnapshot bool)error{
 	if !m.User{if err:=m.requirePrivileges("background "+action);err!=nil{return err}}
-	tx:=m.startTransaction(action,args,"");logDir:=m.Paths.Transactions;if err:=os.MkdirAll(logDir,0o755);err!=nil{return err};logFile,err:=os.OpenFile(filepath.Join(logDir,tx.ID+".log"),os.O_CREATE|os.O_WRONLY|os.O_TRUNC,0o644);if err!=nil{return err}
+	tx, err := m.startTransaction(action,args,"");logDir:=m.Paths.Transactions;if err:=os.MkdirAll(logDir,0o755);err!=nil{return err};logFile,err:=os.OpenFile(filepath.Join(logDir,tx.ID+".log"),os.O_CREATE|os.O_WRONLY|os.O_TRUNC,0o644); if err != nil { return err };if err!=nil{return err}
 	cmd:=exec.Command(os.Args[0],"__worker",action,tx.ID,"--",strings.Join(args,"\x00"));cmd.Stdout=logFile;cmd.Stderr=logFile;cmd.Env=os.Environ();cmd.Env=append(cmd.Env,"YSPM_USER="+boolText(m.User),"YSPM_ARCH="+m.arch);if err:=cmd.Start();err!=nil{_ = logFile.Close();return err};_ = logFile.Close();fmt.Printf("Transaction %s started in background.\n",tx.ID);return nil
 }
 func (m *Manager) Worker(action,id,packed string,yes,autoSnapshot bool)error{
