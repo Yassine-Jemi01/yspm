@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -28,7 +27,13 @@ func CreateSnapshot(m *Manager) (string,error) {
 	cmd:=exec.Command(btrfs,"subvolume","snapshot","-r",source,dst)
 	if out,err:=cmd.CombinedOutput();err!=nil{return "",fmt.Errorf("create btrfs snapshot: %w: %s",err,strings.TrimSpace(string(out)))}
 	s:=model.Snapshot{ID:id,Path:dst,CreatedAt:time.Now(),ReadOnly:true}
-	if err:=store.SaveSnapshotFor(m.User,s);err!=nil{return "",err}
+	if err:=store.SaveSnapshotFor(m.User,s);err!=nil{
+		output, cleanupErr := exec.Command(btrfs, "subvolume", "delete", dst).CombinedOutput()
+		if cleanupErr != nil {
+			return "", errors.Join(err, fmt.Errorf("remove snapshot %s after metadata save failed: %w: %s", dst, cleanupErr, strings.TrimSpace(string(output))))
+		}
+		return "", err
+	}
 	fmt.Printf("Snapshot created: %s\n",id)
 	return id,nil
 }
@@ -40,7 +45,7 @@ func ListSnapshots(m *Manager) error {
 	return nil
 }
 
-func RestoreSnapshot(m *Manager,id string) error {
+func RestoreSnapshot(m *Manager, id string) (retErr error) {
 	if m.User{return errors.New("system snapshots are unavailable in --user mode")}
 	if err:=m.requirePrivileges("snapshot restore");err!=nil{return err}
 	db,err:=store.LoadDBFor(m.User);if err!=nil{return err}
@@ -54,17 +59,28 @@ func RestoreSnapshot(m *Manager,id string) error {
 	backup:=target+".yspm-before-restore"
 	if _,err:=os.Stat(backup);err==nil{return fmt.Errorf("restore backup already exists: %s",backup)}
 	if err:=os.Rename(target,backup);err!=nil{return fmt.Errorf("rename target for restore: %w",err)}
-	restored:=false
-	defer func(){if !restored{_ = os.Rename(backup,target)}}()
+	restored := false
+	defer func() {
+		if restored {
+			return
+		}
+		// A failed btrfs snapshot may have left a partial target. Remove it,
+		// trying the btrfs subvolume operation first, before restoring the old root.
+		if _, statErr := os.Lstat(target); statErr == nil {
+			if _, deleteErr := exec.Command(btrfs, "subvolume", "delete", target).CombinedOutput(); deleteErr != nil {
+				if removeErr := os.RemoveAll(target); removeErr != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("remove partial restore target: %w", removeErr))
+					return
+				}
+			}
+		}
+		if err := os.Rename(backup, target); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore original target from backup %s: %w", backup, err))
+		}
+	}()
 	if out,err:=exec.Command(btrfs,"subvolume","snapshot",snap.Path,target).CombinedOutput();err!=nil{return fmt.Errorf("restore snapshot: %w: %s",err,strings.TrimSpace(string(out)))}
 	if err:=exec.Command(btrfs,"subvolume","delete",backup).Run();err!=nil{return fmt.Errorf("delete old root after restore: %w",err)}
 	restored=true
 	return nil
 }
 
-func SnapshotMetadata(m *Manager) error {
-	db,err:=store.LoadDBFor(m.User);if err!=nil{return err}
-	data,_:=json.MarshalIndent(db.Snapshots,"","  ")
-	fmt.Println(string(data))
-	return nil
-}

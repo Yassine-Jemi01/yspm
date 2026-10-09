@@ -3,6 +3,7 @@ package repo
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -112,12 +113,16 @@ func hardcoreListSource(source string) (string, string, error) {
 	return source, "file://" + filepath.ToSlash(filepath.Dir(source)), nil
 }
 
-func InspectHardcoreArchive(path string) (HardcorePackageData, error) {
+func InspectHardcoreArchive(path string) (result HardcorePackageData, retErr error) {
 	tmp, err := os.MkdirTemp("", "yspm-hardcore-*")
 	if err != nil {
 		return HardcorePackageData{}, err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() {
+		if cleanupErr := os.RemoveAll(tmp); cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("remove temporary legacy extraction %s: %w", tmp, cleanupErr))
+		}
+	}()
 	if err := ExtractArchive(path, "tar", tmp); err != nil {
 		return HardcorePackageData{}, fmt.Errorf("extract legacy package: %w", err)
 	}
@@ -146,11 +151,12 @@ func ReadHardcorePackageRoot(root string) (HardcorePackageData, error) {
 }
 
 func ReadHardcoreInstaller(installerDir string) (HardcorePackageData, error) {
-	b, err := os.ReadFile(filepath.Join(installerDir, "pkinfo"))
+	infoPath := filepath.Join(installerDir, "pkinfo")
+	data, err := os.ReadFile(infoPath)
 	if err != nil {
-		return HardcorePackageData{}, err
+		return HardcorePackageData{}, fmt.Errorf("read legacy package metadata: %w", err)
 	}
-	fields := strings.Fields(string(b))
+	fields := strings.Fields(string(data))
 	if len(fields) < 2 {
 		return HardcorePackageData{}, fmt.Errorf("invalid pkinfo in %s", installerDir)
 	}
@@ -158,20 +164,36 @@ func ReadHardcoreInstaller(installerDir string) (HardcorePackageData, error) {
 	if fields[0] != name {
 		return HardcorePackageData{}, fmt.Errorf("pkinfo package %q does not match installer directory %q", fields[0], name)
 	}
+	readOptionalScript := func(scriptName string) (string, error) {
+		path := filepath.Join(installerDir, scriptName)
+		content, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("read legacy %s script: %w", scriptName, err)
+		}
+		return string(content), nil
+	}
+	install, err := readOptionalScript("install")
+	if err != nil {
+		return HardcorePackageData{}, err
+	}
+	uninstall, err := readOptionalScript("uninstall")
+	if err != nil {
+		return HardcorePackageData{}, err
+	}
 	p := model.Package{
 		Name: name, Version: fields[1], Description: "HardcoreLinux legacy package",
 		OS: "linux", License: "unknown", Kind: "system", Format: HardcorePackageFormat,
+		ABI: "hardcore-legacy",
 	}
 	for _, dep := range fields[2:] {
 		if dep != "" {
 			p.Dependencies = append(p.Dependencies, model.Dependency(dep))
 		}
 	}
-	install, _ := os.ReadFile(filepath.Join(installerDir, "install"))
-	uninstall, _ := os.ReadFile(filepath.Join(installerDir, "uninstall"))
-	return HardcorePackageData{
-		Package: p, InstallScript: string(install), UninstallScript: string(uninstall),
-	}, nil
+	return HardcorePackageData{Package: p, InstallScript: install, UninstallScript: uninstall}, nil
 }
 
 func HardcoreInstalledManifest(systemRoot, name string) ([]model.FileEntry, error) {
@@ -184,16 +206,19 @@ func HardcoreInstalledManifest(systemRoot, name string) ([]model.FileEntry, erro
 	for _, p := range parseHardcoreUninstallPaths(data.UninstallScript) {
 		seen[p] = true
 	}
-	_ = filepath.Walk(installerDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || path == installerDir {
+	if err := filepath.Walk(installerDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || path == installerDir {
+			return walkErr
+		}
+		rel, err := filepath.Rel(systemRoot, path)
+		if err != nil {
 			return err
 		}
-		rel, er := filepath.Rel(systemRoot, path)
-		if er == nil {
-			seen[filepath.ToSlash(rel)] = true
-		}
+		seen[filepath.ToSlash(rel)] = true
 		return nil
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("walk installed legacy metadata: %w", err)
+	}
 
 	var out []model.FileEntry
 	for rel := range seen {
@@ -209,12 +234,14 @@ func HardcoreInstalledManifest(systemRoot, name string) ([]model.FileEntry, erro
 		switch {
 		case info.Mode()&os.ModeSymlink != 0:
 			entry.Type = "symlink"
-			entry.LinkTarget, _ = os.Readlink(target)
+			entry.LinkTarget, err = os.Readlink(target)
+			if err != nil { return nil, fmt.Errorf("read installed symlink %s: %w", rel, err) }
 		case info.IsDir():
 			entry.Type = "dir"
 		case info.Mode().IsRegular():
 			entry.Type = "file"
-			entry.SHA256, _ = fileSHA256(target)
+			entry.SHA256, err = fileSHA256(target)
+			if err != nil { return nil, fmt.Errorf("hash installed legacy file %s: %w", rel, err) }
 		default:
 			continue
 		}

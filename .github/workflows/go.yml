@@ -7,13 +7,54 @@ on:
 
 jobs:
   test:
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.23.x', '1.25.x']
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
-      - name: Test
-        run: go test ./...
+          go-version: ${{ matrix.go-version }}
+      - name: Check formatting of maintained files
+        run: |
+          files="
+          internal/pathutil/path.go
+          internal/manager/lock.go
+          internal/manager/lock_test.go
+          internal/manager/dependency_parse_test.go
+          internal/manager/version.go
+          internal/manager/version_test.go
+          internal/store/store.go
+          internal/store/store_test.go
+          internal/repo/release.go
+          internal/repo/release_test.go
+          internal/repo/security_limits_test.go
+          internal/repo/repo_test.go
+          cmd/yspm/main_test.go
+          "
+          unformatted="$(gofmt -l $files)"
+          if [ -n "$unformatted" ]; then
+            echo "The following files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Test with race detection and coverage
+        run: go test -race -cover ./...
       - name: Build
         run: go build ./cmd/yspm
+
+  staticcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+      - name: Static analysis
+        run: "$(go env GOPATH)/bin/staticcheck ./..."

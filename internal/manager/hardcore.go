@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,8 +28,11 @@ func (m *Manager) hydrateHardcorePackage(p model.Package) (model.Package, error)
 			return p, fmt.Errorf("download %s: %w", p.Name, err)
 		}
 		if err := repo.VerifySHA256(archive, p.SHA256); err != nil {
-			_ = os.Remove(archive)
-			return p, fmt.Errorf("verify %s: %w", p.Name, err)
+			verifyErr := fmt.Errorf("verify %s: %w", p.Name, err)
+			if cleanupErr := os.Remove(archive); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+				verifyErr = errors.Join(verifyErr, fmt.Errorf("remove invalid archive %s: %w", archive, cleanupErr))
+			}
+			return p, verifyErr
 		}
 	}
 	h, err := repo.InspectHardcoreArchive(archive)
@@ -173,25 +177,25 @@ func (m *Manager) Owner(path string) error {
 }
 
 func legacyDependenciesSatisfied(pkgs []model.Package, db model.Database) error {
-	available := map[string]bool{}
+	available := make(map[string]bool, len(db.Packages)+len(pkgs))
 	for name := range db.Packages {
 		available[name] = true
 	}
-	for _, p := range pkgs {
-		available[p.Name] = true
+	for _, pkg := range pkgs {
+		available[pkg.Name] = true
 	}
-	for _, p := range pkgs {
-		for _, dep := range p.Dependencies {
+	for _, pkg := range pkgs {
+		for _, dependency := range pkg.Dependencies {
 			satisfied := false
-			for _, alt := range strings.Split(string(dep), "|") {
-				r := parseDependency(strings.TrimSpace(alt))
-				if available[r.Name] {
+			for _, alternative := range strings.Split(string(dependency), "|") {
+				request := parseDependency(strings.TrimSpace(alternative))
+				if available[request.Name] {
 					satisfied = true
 					break
 				}
 			}
 			if !satisfied {
-				return fmt.Errorf("package %s requires missing dependency %s", p.Name, dep)
+				return fmt.Errorf("package %s requires missing dependency %s", pkg.Name, dependency)
 			}
 		}
 	}

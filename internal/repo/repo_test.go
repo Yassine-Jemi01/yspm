@@ -35,7 +35,7 @@ func writeTestTar(t *testing.T, destination string, members []testTarMember) {
 			Linkname: member.linkname,
 			Mode:     mode,
 		}
-		if member.typeflag == tar.TypeReg || member.typeflag == tar.TypeRegA {
+		if member.typeflag == tar.TypeReg {
 			header.Size = int64(len(member.data))
 		}
 		if err := writer.WriteHeader(header); err != nil {
@@ -43,7 +43,7 @@ func writeTestTar(t *testing.T, destination string, members []testTarMember) {
 			_ = file.Close()
 			t.Fatalf("write tar header %q: %v", member.name, err)
 		}
-		if member.typeflag == tar.TypeReg || member.typeflag == tar.TypeRegA {
+		if member.typeflag == tar.TypeReg {
 			if _, err := writer.Write([]byte(member.data)); err != nil {
 				_ = writer.Close()
 				_ = file.Close()

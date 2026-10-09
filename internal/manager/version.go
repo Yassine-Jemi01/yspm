@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"strconv"
 	"strings"
 	"unicode"
 )
@@ -18,14 +17,11 @@ func compareVersion(a, b string) int {
 		if i >= len(bs) {
 			return 1
 		}
-		ai, aNum := numberToken(as[i])
-		bi, bNum := numberToken(bs[i])
+		aNum := numericToken(as[i])
+		bNum := numericToken(bs[i])
 		if aNum && bNum {
-			if ai < bi {
-				return -1
-			}
-			if ai > bi {
-				return 1
+			if cmp := compareNumericToken(as[i], bs[i]); cmp != 0 {
+				return cmp
 			}
 			continue
 		}
@@ -65,15 +61,40 @@ func tokenizeVersion(v string) []string {
 	return out
 }
 
-func numberToken(s string) (int64, bool) {
-	for _, r := range s {
-		if !unicode.IsDigit(r) {
-			return 0, false
+func numericToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
 		}
 	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, true
+	return true
+}
+
+// compareNumericToken compares decimal strings without converting them to a
+// fixed-width integer, so arbitrarily large version components remain ordered.
+func compareNumericToken(a, b string) int {
+	a = strings.TrimLeft(a, "0")
+	b = strings.TrimLeft(b, "0")
+	if a == "" {
+		a = "0"
 	}
-	return n, true
+	if b == "" {
+		b = "0"
+	}
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
 }

@@ -44,7 +44,7 @@ func TestSaveDatabasePreservesTransactionAddedAfterLoad(t *testing.T) {
 	}
 
 	m := New(true, "x86_64")
-	if err := m.saveDatabasePreservingHistory(staleDB); err != nil {
+	if err := store.SaveDBFor(true, staleDB); err != nil {
 		t.Fatalf("save package database while preserving history: %v", err)
 	}
 	if err := m.finishSuccess(tx); err != nil {

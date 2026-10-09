@@ -17,6 +17,7 @@ import (
 
 	"github.com/Yassine-Jemi01/yspm/internal/config"
 	"github.com/Yassine-Jemi01/yspm/internal/model"
+	"github.com/Yassine-Jemi01/yspm/internal/pathutil"
 	"github.com/Yassine-Jemi01/yspm/internal/repo"
 	"github.com/Yassine-Jemi01/yspm/internal/store"
 )
@@ -26,6 +27,7 @@ type Manager struct {
 	Paths      config.Paths
 	repository string
 	arch       string
+	initErr    error
 }
 
 type dependencyRequest struct { Name, Op, Version, Arch string }
@@ -34,6 +36,7 @@ type stagedPackage struct {
 	Pkg        model.Package
 	Archive    string
 	Stage      string
+	CleanupStage string
 	Manifest   []model.FileEntry
 	Scripts    map[string]string
 	Legacy         bool
@@ -43,12 +46,19 @@ type stagedPackage struct {
 }
 
 func New(user bool, arch string) *Manager {
-	p, _ := config.NewPaths(user)
-	if arch == "" { arch = config.HostArch() } else { arch = config.NormalizeArch(arch) }
-	return &Manager{User:user, Paths:p, repository:config.RepositoryURL(), arch:arch}
+	p, err := config.NewPaths(user)
+	if arch == "" {
+		arch = config.HostArch()
+	} else {
+		arch = config.NormalizeArch(arch)
+	}
+	return &Manager{User: user, Paths: p, repository: config.RepositoryURL(), arch: arch, initErr: err}
 }
 
 func (m *Manager) requirePrivileges(op string) error {
+	if m.initErr != nil {
+		return fmt.Errorf("initialize yspm paths: %w", m.initErr)
+	}
 	if m.User { return nil }
 	if os.Geteuid() != 0 && m.Paths.Root == "/" {
 		return fmt.Errorf("%s requires root privileges; rerun with sudo or use --user", op)
@@ -57,13 +67,16 @@ func (m *Manager) requirePrivileges(op string) error {
 }
 
 func (m *Manager) index() (model.Index, error) {
+	if m.initErr != nil {
+		return model.Index{}, fmt.Errorf("initialize yspm paths: %w", m.initErr)
+	}
 	if !config.IsHardcoreRepository() {
-		if idx, err := repo.LoadCachedIndex(); err == nil {
+		if idx, err := repo.LoadCachedIndexFor(m.User); err == nil {
 			if err := repo.ValidateStableIndex(idx); err == nil { return idx, nil }
 		}
 	}
 	if err := m.Update(); err != nil { return model.Index{}, err }
-	idx, err := repo.LoadCachedIndex()
+	idx, err := repo.LoadCachedIndexFor(m.User)
 	if err != nil { return model.Index{}, err }
 	return idx, repo.ValidateStableIndex(idx)
 }
@@ -71,15 +84,27 @@ func (m *Manager) index() (model.Index, error) {
 func (m *Manager) Update() error {
 	fmt.Printf("Updating stable repository...\n  %s\n", m.repository)
 	var idx model.Index
+	var rawIndex, signature []byte
 	var err error
 	if config.IsHardcoreRepository() {
 		idx, err = repo.FetchHardcoreIndex(m.repository)
 	} else {
-		idx, err = repo.FetchIndex(m.repository)
+		idx, rawIndex, signature, err = repo.FetchIndexData(m.repository)
 	}
-	if err != nil { return err }
-	if err := repo.ValidateStableIndex(idx); err != nil { return err }
-	if err := repo.CacheIndex(idx); err != nil { return err }
+	if err != nil {
+		return err
+	}
+	if err := repo.ValidateStableIndex(idx); err != nil {
+		return err
+	}
+	if config.IsHardcoreRepository() {
+		err = repo.CacheIndexFor(idx, m.User)
+	} else {
+		err = repo.CacheFetchedIndexFor(rawIndex, signature, m.User)
+	}
+	if err != nil {
+		return fmt.Errorf("cache repository index: %w", err)
+	}
 	fmt.Printf("Release %s (%s) — %d packages — ABI %s.\n", idx.Release, idx.Channel, len(idx.Packages), valueOr(idx.ABI,"none"))
 	return nil
 }
@@ -130,7 +155,7 @@ func (m *Manager) printDependencyTree(name string,idx model.Index,prefix string,
 		r:=parseDependency(string(dep))
 		child,e:=m.findSatisfying(r.Name,r.Op+r.Version,idx)
 		if e!=nil{fmt.Printf("%s  ? %s (%s)\n",prefix,dep,e);continue}
-		_ = m.printDependencyTree(child.Name,idx,prefix+"  ",seen)
+		if err := m.printDependencyTree(child.Name, idx, prefix+"  ", seen); err != nil { return err }
 	}
 	return nil
 }
@@ -190,29 +215,35 @@ func (m *Manager) runTransaction(action string,requested []string,yes,upgrade,au
 		plan,err:=m.resolve(idx,db,requested,upgrade);if err!=nil{return err}
 		if len(plan.Packages)==0{fmt.Println("Nothing to do.");return store.SaveDBFor(m.User,db)}
 		if !yes{printInstallPlan(plan,db);if !confirm("Continue? [y/N] "){fmt.Println("Aborted.");return nil}}
-		snapshotID:=""
-		if autoSnapshot&&!m.User{
-			snapshotID,_=CreateSnapshot(m)
+		snapshotID := ""
+		if autoSnapshot && !m.User {
+			snapshotID, err = CreateSnapshot(m)
+			if err != nil {
+				return fmt.Errorf("create pre-transaction snapshot: %w", err)
+			}
 		}
-		tx:=m.startTransaction(action,namesFromPackages(plan.Packages),snapshotID)
+		tx, err := m.startTransaction(action,namesFromPackages(plan.Packages),snapshotID); if err != nil { return err }
 		staged,err:=m.prepare(plan.Packages)
 		if err!=nil{return m.finishFailed(tx,err)}
-		defer cleanupStaged(staged)
+		defer func() {
+			if cleanupErr := cleanupStaged(staged); cleanupErr != nil {
+				fmt.Fprintf(os.Stderr, "yspm: staging cleanup failed: %v\n", cleanupErr)
+			}
+		}()
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		rollback:=&transactionRollback{}
 		for _,sp:=range staged{
-			if err:=m.runScript(sp,"preinstall");err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
-			if err:=m.commitPackage(sp,db,rollback);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
+			if err:=m.runScript(sp,"preinstall");err!=nil{return m.finishFailedWithRollback(tx, rollback, err)}
+			if err:=m.commitPackage(sp,db,rollback);err!=nil{return m.finishFailedWithRollback(tx, rollback, err)}
 			hook:="postinstall";if sp.HardcoreLegacy{hook="install"}
-			if err:=m.runScript(sp,hook);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
-			if err:=ApplyServices(m,sp.Pkg);err!=nil{rollback.rollback();return m.finishFailed(tx,err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
+			if err:=m.runScript(sp,hook);err!=nil{return m.finishFailedWithRollback(tx, rollback, err)}
+			if err:=ApplyServices(m,sp.Pkg);err!=nil{return m.finishFailedWithRollback(tx, rollback, err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{return m.finishFailedWithRollback(tx, rollback, err)}
 			installed:=m.installedFromStage(sp)
 			installed.Explicit=containsName(plan.Requested,sp.Pkg.Name)||installed.Explicit
 			db.Packages[sp.Pkg.Name]=installed
 		}
-		if err:=m.saveDatabasePreservingHistory(db);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
-		rollback.finalize()
-		return m.finishSuccess(tx)
+		if err:=store.SaveDBFor(m.User,db);err!=nil{return m.finishFailedWithRollback(tx, rollback, err)}
+		return m.finishCommitted(tx, rollback.finalize())
 	})
 }
 
@@ -229,7 +260,7 @@ func (m *Manager) resolve(idx model.Index,db model.Database,requested []string,u
 		p,e:=m.chooseWithConstraints(r, constraints[key], idx);if e!=nil{return resolvedPlan{},fmt.Errorf("resolve %q: %w",expr,e)}
 		chosen[p.Name+":"+p.Architecture]=p
 		for _,d:=range p.Dependencies{queue=append(queue,string(d))}
-		for _,d:=range p.SharedRequires{queue=append(queue,d)}
+		queue = append(queue, p.SharedRequires...)
 	}
 	var pkgs []model.Package
 	for _,p:=range chosen{
@@ -293,14 +324,48 @@ func matchesNameOrProvide(p model.Package,want string)bool{
 	return false
 }
 
-func parseDependency(s string)dependencyRequest{
-	s=strings.TrimSpace(s);arch:=""
-	if i:=strings.LastIndex(s,":");i>0&&!strings.Contains(s[i+1:],"/"){arch=config.NormalizeArch(s[i+1:]);s=s[:i]}
-	op,ver:=parseConstraint(s);name:=s
-	if op!=""{
-		idx:=strings.Index(s,op);name=strings.TrimSpace(s[:idx]);ver=strings.TrimSpace(s[idx+len(op):])
+func parseDependency(s string) dependencyRequest {
+	s = strings.TrimSpace(s)
+	arch := ""
+
+	op, _ := parseConstraint(s)
+	opIndex := -1
+	if op != "" {
+		opIndex = strings.Index(s, op)
 	}
-	return dependencyRequest{Name:name,Op:op,Version:ver,Arch:arch}
+	if colon := strings.LastIndex(s, ":"); colon > 0 {
+		candidateEnd := len(s)
+		if opIndex >= 0 && colon < opIndex {
+			candidateEnd = opIndex
+		}
+		candidate := strings.TrimSpace(s[colon+1 : candidateEnd])
+		if isArchitectureSuffix(candidate) {
+			arch = config.NormalizeArch(candidate)
+			if opIndex >= 0 && colon < opIndex {
+				s = strings.TrimSpace(s[:colon] + s[candidateEnd:])
+			} else {
+				s = strings.TrimSpace(s[:colon])
+			}
+		}
+	}
+	op, ver := parseConstraint(s)
+	name := s
+	if op != "" {
+		opIndex = strings.Index(s, op)
+		name = strings.TrimSpace(s[:opIndex])
+		ver = strings.TrimSpace(s[opIndex+len(op):])
+	}
+	return dependencyRequest{Name: name, Op: op, Version: ver, Arch: arch}
+}
+
+func isArchitectureSuffix(value string) bool {
+	normalized := config.NormalizeArch(value)
+	switch normalized {
+	case "x86_64", "aarch64", "i386", "armv7", "riscv64", "ppc64le", "s390x", "loongarch64", "armv6l":
+		return true
+	default:
+		return config.ForeignArchitectures()[normalized]
+	}
 }
 func parseConstraint(s string)(string,string){
 	for _,op:=range []string{"!=",">=","<=","=","<",">"}{if i:=strings.Index(s,op);i>0{return op,strings.TrimSpace(s[i+len(op):])}}
@@ -317,12 +382,29 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 	}
 	if err:=os.MkdirAll(m.Paths.Cache,0o755);err!=nil{return nil,err};if err:=os.MkdirAll(m.Paths.Staging,0o755);err!=nil{return nil,err}
 	sem:=make(chan struct{},4);results:=make([]stagedPackage,len(pkgs));var wg sync.WaitGroup;errCh:=make(chan error,len(pkgs))
-	for i,p:=range pkgs{i,p=i,p;wg.Add(1);go func(){defer wg.Done();sem<-struct{}{};defer func(){<-sem}()
+	for i,p:=range pkgs{wg.Add(1);go func(){defer wg.Done();sem<-struct{}{};defer func(){<-sem}()
 		sp:=stagedPackage{Pkg:p,Scripts:map[string]string{}};archive:=filepath.Join(m.Paths.Cache,packageFilename(p))
 		if p.URL==""&&p.Kind!="meta"{errCh<-fmt.Errorf("package %s has no URL",p.Name);return}
-		valid:=false;if _,err:=os.Stat(archive);err==nil&&p.SHA256!=""{valid=repo.VerifySHA256(archive,p.SHA256)==nil}
-		if p.Kind!="meta"&&!valid{if err:=repo.Download(p.URL,archive);err!=nil{errCh<-fmt.Errorf("download %s: %w",p.Name,err);return};if err:=repo.VerifySHA256(archive,p.SHA256);err!=nil{_ = os.Remove(archive);errCh<-fmt.Errorf("verify %s: %w",p.Name,err);return}}
-		stage,err:=os.MkdirTemp(m.Paths.Staging,p.Name+"-*");if err!=nil{errCh<-err;return};sp.Stage=stage;sp.Archive=archive
+		valid:=false
+		if info, err := os.Lstat(archive); err == nil && info.Mode().IsRegular() && p.SHA256 != "" {
+			valid = repo.VerifySHA256(archive, p.SHA256) == nil
+		}
+		if p.Kind != "meta" && !valid {
+			if err := repo.Download(p.URL, archive); err != nil {
+				errCh <- fmt.Errorf("download %s: %w", p.Name, err)
+				return
+			}
+			if err := repo.VerifySHA256(archive, p.SHA256); err != nil {
+				if cleanupErr := os.Remove(archive); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+					err = errors.Join(err, fmt.Errorf("remove invalid archive %s: %w", archive, cleanupErr))
+				}
+				errCh <- fmt.Errorf("verify %s: %w", p.Name, err)
+				return
+			}
+		}
+		stage,err:=os.MkdirTemp(m.Paths.Staging,p.Name+"-*");if err!=nil{errCh<-err;return};sp.Stage=stage;sp.CleanupStage=stage;sp.Archive=archive
+		// Register staging immediately so every later error path can clean it.
+		results[i] = sp
 		if p.Kind!="meta"{
 			if p.Format==repo.HardcorePackageFormat {
 				data,e:=repo.InspectHardcoreArchive(archive);if e!=nil{errCh<-e;return}
@@ -349,7 +431,9 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 				entryRel:=""
 				if p.Entry!=""&&! (p.Kind=="appimage"||p.Format=="appimage"){
 					entry,err:=repo.FindEntry(rawStage,p.Entry);if err!=nil{errCh<-fmt.Errorf("locate executable for %s: %w",p.Name,err);return}
-					entryRel,_=filepath.Rel(rawStage,entry)
+					var relErr error
+					entryRel, relErr = filepath.Rel(rawStage, entry)
+					if relErr != nil { errCh <- fmt.Errorf("compute executable path for %s: %w", p.Name, relErr); return }
 				}else if p.Kind=="appimage"||p.Format=="appimage"{entryRel=filepath.Base(p.Entry);if entryRel==""||entryRel=="."{entryRel=p.Name+".AppImage"}}
 				rootTree:=filepath.Join(rawStage,"root")
 				if err:=os.MkdirAll(filepath.Join(rootTree,"opt","yspm","packages",p.Name,p.Version),0o755);err!=nil{errCh<-err;return}
@@ -368,14 +452,14 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 					desktop:=fmt.Sprintf("[Desktop Entry]\\nType=Application\\nName=%s\\nComment=%s\\nExec=%s %%U\\nTerminal=false\\nCategories=%s\\n",escapeDesktopText(dname),escapeDesktopText(p.Description),command,cats)
 					if err:=os.WriteFile(filepath.Join(desktopDir,p.Name+".desktop"),[]byte(desktop),0o644);err!=nil{errCh<-err;return}
 				}
-				stage=rootTree
+				sp.Stage = rootTree
 				sp.Legacy=true;sp.Command=command;sp.InstallDir=filepath.Join(m.Paths.Root,"opt","yspm","packages",p.Name,p.Version)
 			}
 		}
 		sp.Manifest,err=repo.Manifest(sp.Stage);if err!=nil{errCh<-err;return}
 		results[i]=sp
 	}()}
-	wg.Wait();close(errCh);for e:=range errCh{cleanupStaged(results);return nil,e};return results,nil
+	wg.Wait();close(errCh);for e:=range errCh{cleanupErr := cleanupStaged(results); return nil, errors.Join(e, cleanupErr)};return results,nil
 }
 
 func (m *Manager) validateConflicts(staged []stagedPackage,db model.Database)error{
@@ -389,49 +473,139 @@ func (m *Manager) validateConflicts(staged []stagedPackage,db model.Database)err
 	return nil
 }
 
-type rollbackEntry struct{target,backup string;created bool}
-type transactionRollback struct{entries []rollbackEntry}
-func(r *transactionRollback)rollback(){for i:=len(r.entries)-1;i>=0;i--{e:=r.entries[i];_ = os.RemoveAll(e.target);if e.backup!=""{_ = os.MkdirAll(filepath.Dir(e.target),0o755);_ = os.Rename(e.backup,e.target)}}}
-func(r *transactionRollback)finalize(){for _,e:=range r.entries{if e.backup!=""{_ = os.RemoveAll(e.backup)}}}
+type rollbackEntry struct {
+	target, backup string
+}
+
+type transactionRollback struct {
+	entries []rollbackEntry
+}
+
+func (r *transactionRollback) rollback() error {
+	var failures []error
+	for i := len(r.entries) - 1; i >= 0; i-- {
+		e := r.entries[i]
+		if err := os.RemoveAll(e.target); err != nil {
+			failures = append(failures, fmt.Errorf("remove %s: %w", e.target, err))
+		}
+		if e.backup != "" {
+			if err := os.MkdirAll(filepath.Dir(e.target), 0o755); err != nil {
+				failures = append(failures, fmt.Errorf("recreate parent for %s: %w", e.target, err))
+				continue
+			}
+			if err := os.Rename(e.backup, e.target); err != nil {
+				failures = append(failures, fmt.Errorf("restore %s from %s: %w", e.target, e.backup, err))
+			}
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (r *transactionRollback) finalize() error {
+	var failures []error
+	for _, e := range r.entries {
+		if e.backup != "" {
+			if err := os.RemoveAll(e.backup); err != nil {
+				failures = append(failures, fmt.Errorf("remove rollback backup %s: %w", e.backup, err))
+			}
+		}
+	}
+	return errors.Join(failures...)
+}
 
 func (m *Manager) commitPackage(sp stagedPackage,db model.Database,rb *transactionRollback)error{
 	for _,e:=range sp.Manifest{
 		if e.Type=="dir"{continue}
 		rel:=filepath.Clean(filepath.FromSlash(e.Path));if filepath.IsAbs(rel)||rel==".."||strings.HasPrefix(rel,".."+string(os.PathSeparator)){return fmt.Errorf("unsafe package path %q",e.Path)}
 		src:=filepath.Join(sp.Stage,rel);target:=filepath.Join(m.Paths.Root,rel)
-		if !within(m.Paths.Root,target){return fmt.Errorf("package path escapes root: %s",e.Path)}
+		if !pathutil.Within(m.Paths.Root,target){return fmt.Errorf("package path escapes root: %s",e.Path)}
 		if err:=os.MkdirAll(filepath.Dir(target),0o755);err!=nil{return err}
-		if existing,err:=os.Lstat(target);err==nil{
+		if _,err:=os.Lstat(target);err==nil{
 			if _,ok:=ownerForPath(db,e.Path);!ok&&!isConfig(sp.Pkg,e.Path){
 				return fmt.Errorf("refusing to overwrite unowned file %s",e.Path)
 			}
 
 			if isConfig(sp.Pkg,e.Path){
-				if old,ok:=findPreviousConfigHash(db,e.Path);ok&&hashPath(target)==old{
+				currentHash, hashErr := hashPath(target)
+				if hashErr != nil {
+					return fmt.Errorf("hash existing config %s: %w", e.Path, hashErr)
+				}
+				if old,ok:=findPreviousConfigHash(db,e.Path);ok&&currentHash==old{
 					backup:=filepath.Join(sp.Stage,".backup",rel);if err:=os.MkdirAll(filepath.Dir(backup),0o755);err!=nil{return err};if err:=os.Rename(target,backup);err!=nil{return err};rb.entries=append(rb.entries,rollbackEntry{target:target,backup:backup})
 				}else{
 					dist:=target+".yspm-dist";if err:=os.RemoveAll(dist);err!=nil{return err};if err:=copyNode(src,dist);err!=nil{return err};continue
 				}
 			}else{
-				_ = existing
 				backup:=filepath.Join(sp.Stage,".backup",rel);if err:=os.MkdirAll(filepath.Dir(backup),0o755);err!=nil{return err};if err:=os.Rename(target,backup);err!=nil{return err};rb.entries=append(rb.entries,rollbackEntry{target:target,backup:backup})
 			}
 		}else if !os.IsNotExist(err){return err}
 		if err:=os.Rename(src,target);err!=nil{
-			if err:=copyNode(src,target);err!=nil{return err};_ = os.RemoveAll(src)
+			if copyErr:=copyNode(src,target);copyErr!=nil{return copyErr}
+			if removeErr:=os.RemoveAll(src);removeErr!=nil {
+				cleanupErr:=os.RemoveAll(target)
+				if cleanupErr!=nil{return errors.Join(fmt.Errorf("remove staged source %s: %w",src,removeErr),fmt.Errorf("clean incomplete destination %s: %w",target,cleanupErr))}
+				return fmt.Errorf("remove staged source %s after copy: %w",src,removeErr)
+			}
 		}
 		rb.entries=append(rb.entries,rollbackEntry{target:target})
 	}
 	return nil
 }
 
-func copyNode(src,dst string)error{
-	info,err:=os.Lstat(src);if err!=nil{return err}
-	if info.Mode()&os.ModeSymlink!=0{target,err:=os.Readlink(src);if err!=nil{return err};_ = os.RemoveAll(dst);return os.Symlink(target,dst)}
-	if info.IsDir(){if err:=os.MkdirAll(dst,info.Mode().Perm());err!=nil{return err};return nil}
-	in,err:=os.Open(src);if err!=nil{return err};defer in.Close()
-	out,err:=os.OpenFile(dst,os.O_CREATE|os.O_TRUNC|os.O_WRONLY,info.Mode().Perm());if err!=nil{return err}
-	if _,err:=io.Copy(out,in);err!=nil{_ = out.Close();return err};return out.Close()
+func copyNode(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(dst); err != nil {
+			return err
+		}
+		return os.Symlink(target, dst)
+	}
+	if info.IsDir() {
+		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+			return err
+		}
+		children, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			if err := copyNode(filepath.Join(src, child.Name()), filepath.Join(dst, child.Name())); err != nil {
+				return err
+			}
+		}
+		return os.Chmod(dst, info.Mode().Perm())
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		if closeErr := in.Close(); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("close copy source: %w", closeErr))
+		}
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeOutErr := out.Close()
+	closeInErr := in.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeOutErr != nil {
+		return closeOutErr
+	}
+	if closeInErr != nil {
+		return closeInErr
+	}
+	return nil
 }
 
 func (m *Manager) installedFromStage(sp stagedPackage)model.InstalledPackage{
@@ -442,7 +616,18 @@ func (m *Manager) installedFromStage(sp stagedPackage)model.InstalledPackage{
 
 func isConfig(p model.Package,path string)bool{for _,x:=range p.ConfigFiles{if filepath.ToSlash(x)==filepath.ToSlash(path){return true}};return false}
 func findPreviousConfigHash(db model.Database,path string)(string,bool){for _,p:=range db.Packages{if h,ok:=p.ConfigHashes[path];ok{return h,true}};return "",false}
-func hashPath(path string)string{f,err:=os.Open(path);if err!=nil{return ""};defer f.Close();h:=sha256.New();_,_=io.Copy(h,f);return hex.EncodeToString(h.Sum(nil))}
+func hashPath(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
 
 func (m *Manager) runScript(sp stagedPackage,name string)error{
 	script:=strings.TrimSpace(sp.Scripts[name]);if script==""{return nil}
@@ -464,23 +649,27 @@ func (m *Manager) RemoveMany(names []string,yes,autoSnapshot bool)error{
 			for otherName,other:=range db.Packages{if otherName==name||containsName(names,otherName){continue};if dependsOn(other.Dependencies,name){return fmt.Errorf("cannot remove %q: installed package %q depends on it",name,otherName)}}
 		}
 		if !yes{fmt.Printf("Remove %s? [y/N] ",strings.Join(names,", "));if !confirm(""){fmt.Println("Aborted.");return nil}}
-		if autoSnapshot&&!m.User{_,_=CreateSnapshot(m)}
-		tx:=m.startTransaction("remove",names,"")
+		if autoSnapshot && !m.User {
+			if _, err := CreateSnapshot(m); err != nil {
+				return fmt.Errorf("create pre-removal snapshot: %w", err)
+			}
+		}
+		tx, err := m.startTransaction("remove",names,""); if err != nil { return err }
 		rb:=&transactionRollback{}
 		for _,name:=range names{
 			p:=db.Packages[name]
 			if p.Format==repo.HardcorePackageFormat {
 				if err:=m.runInstalledHook(p,"uninstall");err!=nil{return m.finishFailed(tx,err)}
 			} else if err:=m.runInstalledHook(p,"preremove");err!=nil{return m.finishFailed(tx,err)}
-			if err:=RemovePackageFiles(m,p,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-			if err:=DisableServices(m,p.Services);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+			if err:=RemovePackageFiles(m,p,rb);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
+			if err:=DisableServices(m,p.Services);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
 			if p.Format!=repo.HardcorePackageFormat {
-				if err:=m.runInstalledHook(p,"postremove");err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+				if err:=m.runInstalledHook(p,"postremove");err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
 			}
 			delete(db.Packages,name)
 		}
-		if err:=m.saveDatabasePreservingHistory(db);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-				rb.finalize();return m.finishSuccess(tx)
+		if err:=store.SaveDBFor(m.User,db);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
+				return m.finishCommitted(tx, rb.finalize())
 	})
 }
 
@@ -493,8 +682,14 @@ func (m *Manager) runInstalledHook(p model.InstalledPackage,name string) error {
 	if err != nil { return err }
 	path := f.Name()
 	defer os.Remove(path)
-	if _, err := f.WriteString(script); err != nil { _ = f.Close(); return err }
-	if err := f.Chmod(0o700); err != nil { _ = f.Close(); return err }
+	if _, err := f.WriteString(script); err != nil {
+		if closeErr := f.Close(); closeErr != nil { return errors.Join(err, fmt.Errorf("close hook file: %w", closeErr)) }
+		return err
+	}
+	if err := f.Chmod(0o700); err != nil {
+		if closeErr := f.Close(); closeErr != nil { return errors.Join(err, fmt.Errorf("close hook file: %w", closeErr)) }
+		return err
+	}
 	if err := f.Close(); err != nil { return err }
 	cmd := exec.Command("/bin/sh", path)
 	cmd.Env = append(os.Environ(), "YSPM_ROOT="+m.Paths.Root, "YSPM_PACKAGE="+p.Name, "YSPM_VERSION="+p.Version)
@@ -502,13 +697,6 @@ func (m *Manager) runInstalledHook(p model.InstalledPackage,name string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil { return fmt.Errorf("%s hook for %s failed: %w: %s", name, p.Name, err, strings.TrimSpace(string(out))) }
 	return nil
-}
-func (m *Manager) runInstalledHookByName(name,hook string) error {
-	db, err := store.LoadDBFor(m.User)
-	if err != nil { return err }
-	p, ok := db.Packages[name]
-	if !ok { return nil }
-	return m.runInstalledHook(p, hook)
 }
 func copyHooks(in map[string]string) map[string]string {
 	if len(in)==0 { return nil }
@@ -533,14 +721,19 @@ func (m *Manager) Check()error{
 		for _,e:=range p.Manifest{
 			if e.Type=="dir"{continue}
 			target:=filepath.Join(m.Paths.Root,filepath.FromSlash(e.Path))
-			info,err:=os.Lstat(target)
+			_,err:=os.Lstat(target)
 			if os.IsNotExist(err){fmt.Printf("%s: missing %s\n",name,e.Path);problems++;continue}
 			if err!=nil{fmt.Printf("%s: cannot stat %s: %v\n",name,e.Path,err);problems++;continue}
 			if e.Type=="symlink"{got,err:=os.Readlink(target);if err!=nil||got!=e.LinkTarget{fmt.Printf("%s: symlink mismatch %s\n",name,e.Path);problems++};continue}
 			if e.Type=="file"&&e.SHA256!=""&&p.ConfigHashes[e.Path]==""{
-				got:=hashPath(target);if got!=""&&!strings.EqualFold(got,e.SHA256){fmt.Printf("%s: modified %s\n",name,e.Path);problems++}
+				got, hashErr := hashPath(target)
+				if hashErr != nil {
+					fmt.Printf("%s: cannot hash %s: %v\n", name, e.Path, hashErr)
+					problems++
+					continue
+				}
+				if !strings.EqualFold(got,e.SHA256){fmt.Printf("%s: modified %s\n",name,e.Path);problems++}
 			}
-			_ = info
 		}
 	}
 	if problems>0{return fmt.Errorf("integrity check found %d problem(s)",problems)};fmt.Println("Package database looks consistent.");return nil
@@ -550,22 +743,82 @@ func (m *Manager) History()error{db,err:=store.LoadDBFor(m.User);if err!=nil{ret
 func (m *Manager) Transaction(id string)error{t,err:=store.GetTransactionFor(m.User,id);if err!=nil{return err};fmt.Printf("ID: %s\nAction: %s\nStatus: %s\nStarted: %s\n",t.ID,t.Action,t.Status,t.StartedAt.Format(time.RFC3339));if !t.FinishedAt.IsZero(){fmt.Printf("Finished: %s\n",t.FinishedAt.Format(time.RFC3339))};if t.Error!=""{fmt.Printf("Error: %s\n",t.Error)};return nil}
 func (m *Manager) Release()error{db,err:=store.LoadDBFor(m.User);if err!=nil{return err};idx,err:=m.index();if err!=nil{return err};fmt.Printf("Installed release: %s\nRepository release: %s\nABI: %s\nPackages installed: %d\n",db.Release,idx.Release,valueOr(db.ABI,"none"),len(db.Packages));return nil}
 
-func (m *Manager) UpgradeRelease(release string,yes,autoSnapshot bool)error{
-	if err:=m.requirePrivileges("release upgrade");err!=nil{return err}
-	return withLock(m.Paths.State,func()error{
-		db,err:=store.LoadDBFor(m.User);if err!=nil{return err};if db.Release==release{return errors.New("requested release is already installed")}
-		url:=config.ReleaseRepositoryURL(release);fmt.Printf("Loading release %s from %s\n",release,url)
-		idx,err:=repo.FetchIndex(url);if err!=nil{return err}
-		if err:=repo.ValidateStableIndex(idx);err!=nil{return err}
-		if !yes{fmt.Printf("Upgrade release %s -> %s? [y/N] ",db.Release,release);if !confirm(""){return nil}}
-		plan,err:=m.resolve(idx,db,nil,true);if err!=nil{return fmt.Errorf("release resolution failed: %w",err)}
-		oldRepo:=m.repository;m.repository=url;defer func(){m.repository=oldRepo}()
-		tx:=m.startTransaction("release-upgrade",namesFromPackages(plan.Packages),"")
-		rb:=&transactionRollback{};if autoSnapshot&&!m.User{_,_=CreateSnapshot(m)}
-		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer cleanupStaged(staged)
-		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
-		for _,sp:=range staged{if err:=m.commitPackage(sp,db,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)};db.Packages[sp.Pkg.Name]=m.installedFromStage(sp)}
-		db.Release,db.ABI=idx.Release,idx.ABI;if err:=m.saveDatabasePreservingHistory(db);err!=nil{rb.rollback();return m.finishFailed(tx,err)};rb.finalize();_=repo.CacheIndex(idx);return m.finishSuccess(tx)
+func (m *Manager) UpgradeRelease(release string, yes, autoSnapshot bool) error {
+	if err := m.requirePrivileges("release upgrade"); err != nil {
+		return err
+	}
+	return withLock(m.Paths.State, func() error {
+		db, err := store.LoadDBFor(m.User)
+		if err != nil {
+			return err
+		}
+		if db.Release == release {
+			return errors.New("requested release is already installed")
+		}
+		source := config.ReleaseRepositoryURL(release)
+		fmt.Printf("Loading release %s from %s\n", release, source)
+
+		idx, rawIndex, signature, err := repo.FetchIndexData(source)
+		if err != nil {
+			return err
+		}
+		if err := repo.ValidateStableIndex(idx); err != nil {
+			return err
+		}
+		if !yes {
+			fmt.Printf("Upgrade release %s -> %s? [y/N] ", db.Release, release)
+			if !confirm("") {
+				return nil
+			}
+		}
+		plan, err := m.resolve(idx, db, nil, true)
+		if err != nil {
+			return fmt.Errorf("release resolution failed: %w", err)
+		}
+
+		oldRepo := m.repository
+		m.repository = source
+		defer func() { m.repository = oldRepo }()
+
+		if autoSnapshot && !m.User {
+			if _, err := CreateSnapshot(m); err != nil {
+				return fmt.Errorf("create pre-release-upgrade snapshot: %w", err)
+			}
+		}
+		tx, err := m.startTransaction("release-upgrade", namesFromPackages(plan.Packages), "")
+		if err != nil {
+			return err
+		}
+		rb := &transactionRollback{}
+		staged, err := m.prepare(plan.Packages)
+		if err != nil {
+			return m.finishFailed(tx, err)
+		}
+		defer func() {
+			if cleanupErr := cleanupStaged(staged); cleanupErr != nil {
+				fmt.Fprintf(os.Stderr, "yspm: staging cleanup failed: %v\n", cleanupErr)
+			}
+		}()
+		if err := m.validateConflicts(staged, db); err != nil {
+			return m.finishFailed(tx, err)
+		}
+		for _, sp := range staged {
+			if err := m.commitPackage(sp, db, rb); err != nil {
+				return m.finishFailedWithRollback(tx, rb, err)
+			}
+			db.Packages[sp.Pkg.Name] = m.installedFromStage(sp)
+		}
+		db.Release, db.ABI = idx.Release, idx.ABI
+		if err := store.SaveDBFor(m.User, db); err != nil {
+			return m.finishFailedWithRollback(tx, rb, err)
+		}
+		cleanupErr := rb.finalize()
+		statusErr := m.finishSuccess(tx)
+		cacheErr := repo.CacheFetchedIndexFor(rawIndex, signature, m.User)
+		if cacheErr != nil {
+			cacheErr = fmt.Errorf("release upgraded but target index could not be cached: %w", cacheErr)
+		}
+		return errors.Join(cleanupErr, statusErr, cacheErr)
 	})
 }
 
@@ -587,46 +840,149 @@ func (m *Manager) RepoIndex(dir,output,baseURL,release,abi string)error{_,err:=r
 func (m *Manager) RepoSign(index,key,sig string)error{return repo.SignRepositoryIndex(index,key,sig)}
 func (m *Manager) GenerateKey(pub,priv string)error{return repo.GenerateKeypair(pub,priv)}
 
-// saveDatabasePreservingHistory merges the latest transaction and snapshot records
-// into a transaction's in-memory package database before persisting it. The
-// transaction was recorded separately by startTransaction, so saving an older
-// in-memory database must not erase that newly-created history entry.
-func (m *Manager) saveDatabasePreservingHistory(db model.Database) error {
-	latest, err := store.LoadDBFor(m.User)
+func (m *Manager) startTransaction(action string, packages []string, snapshot string) (model.Transaction, error) {
+	tx := model.Transaction{ID: newID(), StartedAt: time.Now(), Action: action, Packages: packages, Status: "running", SnapshotBefore: snapshot}
+	if err := store.AddTransactionFor(m.User, tx); err != nil {
+		return model.Transaction{}, fmt.Errorf("record transaction start: %w", err)
+	}
+	return tx, nil
+}
+
+func (m *Manager) finishSuccess(tx model.Transaction) error {
+	tx.Status = "success"
+	tx.FinishedAt = time.Now()
+	if err := store.UpdateTransactionFor(m.User, tx); err != nil {
+		return fmt.Errorf("transaction committed but failed to record success: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) finishFailed(tx model.Transaction, cause error) error {
+	tx.Status = "failed"
+	tx.Error = cause.Error()
+	tx.FinishedAt = time.Now()
+	if err := store.UpdateTransactionFor(m.User, tx); err != nil {
+		return errors.Join(cause, fmt.Errorf("also failed to record transaction failure: %w", err))
+	}
+	return cause
+}
+
+func (m *Manager) finishFailedWithRollback(tx model.Transaction, rb *transactionRollback, cause error) error {
+	if err := rb.rollback(); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("rollback failed: %w", err))
+	}
+	return m.finishFailed(tx, cause)
+}
+
+func (m *Manager) finishCommitted(tx model.Transaction, cleanupErr error) error {
+	statusErr := m.finishSuccess(tx)
+	if cleanupErr != nil {
+		return errors.Join(fmt.Errorf("transaction committed but rollback backup cleanup failed: %w", cleanupErr), statusErr)
+	}
+	return statusErr
+}
+
+func (m *Manager) RunBackground(action string, args []string, yes, autoSnapshot bool) error {
+	if !m.User {
+		if err := m.requirePrivileges("background " + action); err != nil {
+			return err
+		}
+	}
+	if !yes && !confirm("Start background " + action + " transaction? [y/N] ") {
+		fmt.Println("Aborted.")
+		return nil
+	}
+	tx, err := m.startTransaction(action, args, "")
 	if err != nil {
 		return err
 	}
-	db.Transactions = latest.Transactions
-	db.Snapshots = latest.Snapshots
-	return store.SaveDBFor(m.User, db)
-}
-
-func (m *Manager) startTransaction(action string,packages []string,snapshot string)model.Transaction{
-	tx:=model.Transaction{ID:newID(),StartedAt:time.Now(),Action:action,Packages:packages,Status:"running",SnapshotBefore:snapshot};_ = store.AddTransactionFor(m.User,tx);return tx
-}
-func(m *Manager)finishSuccess(tx model.Transaction)error{tx.Status="success";tx.FinishedAt=time.Now();return store.UpdateTransactionFor(m.User,tx)}
-func(m *Manager)finishFailed(tx model.Transaction,err error)error{tx.Status="failed";tx.Error=err.Error();tx.FinishedAt=time.Now();_=store.UpdateTransactionFor(m.User,tx);return err}
-
-func (m *Manager) RunBackground(action string,args []string,yes,autoSnapshot bool)error{
-	if !m.User{if err:=m.requirePrivileges("background "+action);err!=nil{return err}}
-	tx:=m.startTransaction(action,args,"");logDir:=m.Paths.Transactions;if err:=os.MkdirAll(logDir,0o755);err!=nil{return err};logFile,err:=os.OpenFile(filepath.Join(logDir,tx.ID+".log"),os.O_CREATE|os.O_WRONLY|os.O_TRUNC,0o644);if err!=nil{return err}
-	cmd:=exec.Command(os.Args[0],"__worker",action,tx.ID,"--",strings.Join(args,"\x00"));cmd.Stdout=logFile;cmd.Stderr=logFile;cmd.Env=os.Environ();cmd.Env=append(cmd.Env,"YSPM_USER="+boolText(m.User),"YSPM_ARCH="+m.arch);if err:=cmd.Start();err!=nil{_ = logFile.Close();return err};_ = logFile.Close();fmt.Printf("Transaction %s started in background.\n",tx.ID);return nil
-}
-func (m *Manager) Worker(action,id,packed string,yes,autoSnapshot bool)error{
-	args:=[]string{};if packed!=""{args=strings.Split(packed,"\x00")};var err error
-	switch action{
-	case "install":
-		local:=false;for _,a:=range args{if strings.HasSuffix(strings.ToLower(a),".yspkg"){local=true;break}}
-		if local{err=m.InstallLocal(args,true,autoSnapshot)}else{err=m.InstallMany(args,true,autoSnapshot)}
-	case "remove":err=m.RemoveMany(args,true,autoSnapshot)
-	case "upgrade":err=m.Upgrade(true,autoSnapshot)
-	default:err=fmt.Errorf("unsupported background action %q",action)
+	logDir := m.Paths.Transactions
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return m.finishFailed(tx, fmt.Errorf("create transaction log directory: %w", err))
 	}
-	tx,e:=store.GetTransactionFor(m.User,id);if e==nil{if err==nil{tx.Status="success"}else{tx.Status="failed";tx.Error=err.Error()};tx.FinishedAt=time.Now();_=store.UpdateTransactionFor(m.User,tx)}
-	return err
+	logFile, err := os.OpenFile(filepath.Join(logDir, tx.ID+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return m.finishFailed(tx, fmt.Errorf("open transaction log: %w", err))
+	}
+	workerArgs := []string{"__worker", action, tx.ID}
+	if autoSnapshot {
+		workerArgs = append(workerArgs, "--snapshot")
+	}
+	workerArgs = append(workerArgs, "--", strings.Join(args, "\x00"))
+	cmd := exec.Command(os.Args[0], workerArgs...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Env = append(os.Environ(), "YSPM_USER="+boolText(m.User), "YSPM_ARCH="+m.arch)
+	if err := cmd.Start(); err != nil {
+		closeErr := logFile.Close()
+		startErr := fmt.Errorf("start background worker: %w", err)
+		if closeErr != nil {
+			startErr = errors.Join(startErr, fmt.Errorf("close transaction log: %w", closeErr))
+		}
+		return m.finishFailed(tx, startErr)
+	}
+	if err := logFile.Close(); err != nil {
+		return fmt.Errorf("background worker started, but transaction log close failed: %w", err)
+	}
+	fmt.Printf("Transaction %s started in background.\n", tx.ID)
+	return nil
 }
 
-func (m *Manager) runInstalledHookFromArchive(_ model.InstalledPackage,_ string)error{return nil}
+func (m *Manager) Worker(action, id, packed string, yes, autoSnapshot bool) error {
+	args := []string{}
+	if packed != "" {
+		args = strings.Split(packed, "\x00")
+	}
+	var operationErr error
+	switch action {
+	case "install":
+		local := false
+		for _, a := range args {
+			if isLocalArchivePath(a) {
+				local = true
+				break
+			}
+		}
+		if local {
+			operationErr = m.InstallLocal(args, true, autoSnapshot)
+		} else {
+			operationErr = m.InstallMany(args, true, autoSnapshot)
+		}
+	case "remove":
+		operationErr = m.RemoveMany(args, true, autoSnapshot)
+	case "upgrade":
+		operationErr = m.Upgrade(true, autoSnapshot)
+	case "autoremove":
+		operationErr = m.Autoremove(true, autoSnapshot)
+	default:
+		operationErr = fmt.Errorf("unsupported background action %q", action)
+	}
+	tx, err := store.GetTransactionFor(m.User, id)
+	if err != nil {
+		return errors.Join(operationErr, fmt.Errorf("load background transaction record: %w", err))
+	}
+	if operationErr == nil {
+		tx.Status = "success"
+	} else {
+		tx.Status = "failed"
+		tx.Error = operationErr.Error()
+	}
+	tx.FinishedAt = time.Now()
+	if err := store.UpdateTransactionFor(m.User, tx); err != nil {
+		return errors.Join(operationErr, fmt.Errorf("update background transaction record: %w", err))
+	}
+	return operationErr
+}
+
+func isLocalArchivePath(path string) bool {
+	x := strings.ToLower(strings.TrimSpace(path))
+	for _, suffix := range []string{".yspkg", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.zst", ".zip"} {
+		if strings.HasSuffix(x, suffix) {
+			return true
+		}
+	}
+	return false
+}
 
 func packageFilename(p model.Package)string{
 	if p.Format=="yspkg"{return p.Name+"-"+p.Version+"-"+p.Architecture+".yspkg"}
@@ -639,12 +995,31 @@ func packageFilename(p model.Package)string{
 	return p.Name+"-"+p.Version+"."+strings.ReplaceAll(p.Format,"/","-")
 }
 func namesFromPackages(ps []model.Package)[]string{out:=make([]string,len(ps));for i,p:=range ps{out[i]=p.Name};return out}
-func cleanupStaged(xs []stagedPackage){for _,x:=range xs{if x.Stage!=""{_ = os.RemoveAll(x.Stage)}}}
-func within(root,target string)bool{rel,err:=filepath.Rel(root,target);if err!=nil{return false};return rel=="."||(!strings.HasPrefix(rel,".."+string(os.PathSeparator))&&rel!="..")}
+func cleanupStaged(xs []stagedPackage) error {
+	var cleanupErr error
+	for _, x := range xs {
+		path := x.CleanupStage
+		if path == "" {
+			path = x.Stage
+		}
+		if path == "" {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove staging directory %s: %w", path, err))
+		}
+	}
+	return cleanupErr
+}
 func dependsOn(ds []model.Dependency,name string)bool{for _,d:=range ds{if parseDependency(string(d)).Name==name{return true}};return false}
 func containsName(xs []string,want string)bool{for _,x:=range xs{if x==want{return true}};return false}
 func containsString(xs []string,want string)bool{return containsName(xs,want)}
-func confirm(prompt string)bool{if prompt!=""{fmt.Print(prompt)};var s string;_,_=fmt.Scanln(&s);return strings.EqualFold(strings.TrimSpace(s),"y")}
+func confirm(prompt string) bool {
+	if prompt != "" { fmt.Print(prompt) }
+	var answer string
+	if _, err := fmt.Scanln(&answer); err != nil { return false }
+	return strings.EqualFold(strings.TrimSpace(answer), "y")
+}
 func printInstallPlan(plan resolvedPlan,db model.Database){fmt.Printf("Transaction plan (%d package(s)):\n",len(plan.Packages));for _,p:=range plan.Packages{if old,ok:=db.Packages[p.Name];ok{fmt.Printf("  upgrade %-20s %s -> %s\n",p.Name,old.Version,p.Version)}else{fmt.Printf("  install %-20s %s\n",p.Name,p.Version)}}}
 func valueOr(a,b string)string{if a==""{return b};return a}
 func firstNonEmpty(a,b string)string{if a!=""{return a};return b}

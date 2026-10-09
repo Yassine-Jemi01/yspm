@@ -3,6 +3,7 @@ package repo
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/bzip2"
 	"compress/gzip"
 	"crypto/ed25519"
@@ -19,7 +20,6 @@ import (
 	"os/exec"
 	pathpkg "path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -28,118 +28,229 @@ import (
 	"github.com/Yassine-Jemi01/yspm/internal/model"
 )
 
-func indexCachePath() (string, error) {
-	d, err := config.CacheDir()
+type indexCacheEnvelope struct {
+	FormatVersion int    `json:"format_version"`
+	RawIndex      []byte `json:"raw_index"`
+	Signature     []byte `json:"signature,omitempty"`
+}
+
+func indexCachePathFor(user bool) (string, error) {
+	d, err := config.CacheDirFor(user)
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(d, "index.json"), nil
 }
+
+const (
+	maxRepositoryMetadataBytes int64 = 64 << 20
+	maxDetachedSignatureBytes  int64 = 4 << 10
+	maxDownloadBytes           int64 = 4 << 30
+	maxZipEntries                    = 100_000
+	maxZipEntryBytes           uint64 = 4 << 30
+	maxZipExpandedBytes        uint64 = 8 << 30
+)
+
 func readSource(source string) ([]byte, error) {
+	return readSourceLimit(source, maxRepositoryMetadataBytes)
+}
+
+func readSourceLimit(source string, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		return nil, errors.New("invalid source size limit")
+	}
 	if u, err := url.Parse(source); err == nil && u.Scheme != "" && u.Scheme != "file" {
-		r := &http.Client{Timeout: 45 * time.Second}
-		resp, err := r.Get(source)
+		client := &http.Client{Timeout: 45 * time.Second}
+		resp, err := client.Get(source)
 		if err != nil {
 			return nil, err
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("repository returned HTTP %s", resp.Status)
+			return nil, fmt.Errorf("source returned HTTP %s", resp.Status)
 		}
-		return io.ReadAll(resp.Body)
+		if resp.ContentLength > limit {
+			return nil, fmt.Errorf("source size %d exceeds %d-byte limit", resp.ContentLength, limit)
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > limit {
+			return nil, fmt.Errorf("source exceeds %d-byte limit", limit)
+		}
+		return data, nil
 	}
 	if u, err := url.Parse(source); err == nil && u.Scheme == "file" {
 		source = u.Path
 	}
-	return os.ReadFile(source)
+	file, err := os.Open(source)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if info, err := file.Stat(); err != nil {
+		return nil, err
+	} else if info.Size() > limit {
+		return nil, fmt.Errorf("source size %d exceeds %d-byte limit", info.Size(), limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("source exceeds %d-byte limit", limit)
+	}
+	return data, nil
 }
 
 func FetchIndex(source string) (model.Index, error) {
+	idx, _, _, err := FetchIndexData(source)
+	return idx, err
+}
+
+// FetchIndexData returns the parsed index, the exact bytes that were signed by
+// the repository, and the decoded detached signature. Keeping the original bytes
+// is essential: re-marshalling JSON changes the signed message.
+func FetchIndexData(source string) (model.Index, []byte, []byte, error) {
 	data, err := readSource(source)
 	if err != nil {
-		return model.Index{}, fmt.Errorf("fetch repository index: %w", err)
+		return model.Index{}, nil, nil, fmt.Errorf("fetch repository index: %w", err)
 	}
 	var idx model.Index
 	if err := json.Unmarshal(data, &idx); err != nil {
-		return model.Index{}, fmt.Errorf("invalid repository index: %w", err)
+		return model.Index{}, nil, nil, fmt.Errorf("invalid repository index: %w", err)
 	}
 	if idx.Release == "" || idx.Channel == "" {
-		return model.Index{}, errors.New("repository index is missing release/channel")
+		return model.Index{}, nil, nil, errors.New("repository index is missing release/channel")
 	}
-	if err := ValidateStableIndex(idx); err != nil { return model.Index{}, err }
+	if err := ValidateStableIndex(idx); err != nil {
+		return model.Index{}, nil, nil, err
+	}
+	var signature []byte
 	if config.RequireRepositorySignature() {
-		if err := verifyIndexSignature(data); err != nil {
-			return model.Index{}, err
+		signature, err = fetchAndVerifyIndexSignature(data)
+		if err != nil {
+			return model.Index{}, nil, nil, err
 		}
 	}
-	return idx, nil
+	return idx, data, signature, nil
 }
 
-func verifyIndexSignature(data []byte) error {
+func decodePublicKey() (ed25519.PublicKey, error) {
 	keyText := strings.TrimSpace(config.RepositoryPublicKey())
-	sigURL := strings.TrimSpace(config.RepositorySignatureURL())
-	if keyText == "" || sigURL == "" {
-		return errors.New("repository signatures are required but public key/signature URL are not configured")
-	}
-	keyRaw, err := hex.DecodeString(strings.TrimSpace(keyText))
+	keyRaw, err := hex.DecodeString(keyText)
 	if err != nil {
 		keyRaw, err = base64.StdEncoding.DecodeString(keyText)
 	}
 	if err != nil || len(keyRaw) != ed25519.PublicKeySize {
-		return errors.New("invalid Ed25519 repository public key")
+		return nil, errors.New("invalid Ed25519 repository public key")
 	}
-	sigRaw, err := readSource(sigURL)
+	return ed25519.PublicKey(keyRaw), nil
+}
+
+func decodeSignature(signatureText []byte) ([]byte, error) {
+	text := strings.TrimSpace(string(signatureText))
+	sig, err := hex.DecodeString(text)
 	if err != nil {
-		return fmt.Errorf("fetch repository signature: %w", err)
-	}
-	sigText := strings.TrimSpace(string(sigRaw))
-	sig, err := hex.DecodeString(sigText)
-	if err != nil {
-		sig, err = base64.StdEncoding.DecodeString(sigText)
+		sig, err = base64.StdEncoding.DecodeString(text)
 	}
 	if err != nil || len(sig) != ed25519.SignatureSize {
-		return errors.New("invalid repository signature")
+		return nil, errors.New("invalid repository signature")
 	}
-	if !ed25519.Verify(ed25519.PublicKey(keyRaw), data, sig) {
+	return sig, nil
+}
+
+func verifyIndexSignatureBytes(data, signature []byte) error {
+	if len(signature) != ed25519.SignatureSize {
+		return errors.New("repository cache has no valid detached signature")
+	}
+	key, err := decodePublicKey()
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(key, data, signature) {
 		return errors.New("repository signature verification failed")
 	}
 	return nil
 }
 
-func CacheIndex(idx model.Index) error {
-	path, err := indexCachePath()
-	if err != nil {
-		return err
+func fetchAndVerifyIndexSignature(data []byte) ([]byte, error) {
+	sigURL := strings.TrimSpace(config.RepositorySignatureURL())
+	if sigURL == "" {
+		return nil, errors.New("repository signatures are required but signature URL is not configured")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	key, err := decodePublicKey()
+	if err != nil {
+		return nil, err
+	}
+	sigRaw, err := readSourceLimit(sigURL, maxDetachedSignatureBytes)
+	if err != nil {
+		return nil, fmt.Errorf("fetch repository signature: %w", err)
+	}
+	sig, err := decodeSignature(sigRaw)
+	if err != nil {
+		return nil, err
+	}
+	if !ed25519.Verify(key, data, sig) {
+		return nil, errors.New("repository signature verification failed")
+	}
+	return sig, nil
+}
+
+func CacheIndex(idx model.Index) error {
+	return CacheIndexFor(idx, os.Geteuid() != 0)
+}
+
+func CacheIndexFor(idx model.Index, user bool) error {
+	if err := ValidateStableIndex(idx); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "index-*.tmp")
+	return CacheFetchedIndexFor(data, nil, user)
+}
+
+func CacheFetchedIndexFor(rawIndex, signature []byte, user bool) error {
+	var idx model.Index
+	if err := json.Unmarshal(rawIndex, &idx); err != nil {
+		return fmt.Errorf("refusing to cache invalid repository index: %w", err)
+	}
+	if err := ValidateStableIndex(idx); err != nil {
+		return err
+	}
+	if config.RequireRepositorySignature() {
+		if err := verifyIndexSignatureBytes(rawIndex, signature); err != nil {
+			return fmt.Errorf("refusing to cache unverified repository index: %w", err)
+		}
+	}
+	path, err := indexCachePathFor(user)
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		_ = tmp.Close()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
+	cache := indexCacheEnvelope{
+		FormatVersion: 1,
+		RawIndex:      append([]byte(nil), rawIndex...),
+		Signature:     append([]byte(nil), signature...),
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return writeAtomic(bytes.NewReader(data), path)
 }
 
 func LoadCachedIndex() (model.Index, error) {
-	path, err := indexCachePath()
+	return LoadCachedIndexFor(os.Geteuid() != 0)
+}
+
+func LoadCachedIndexFor(user bool) (model.Index, error) {
+	path, err := indexCachePathFor(user)
 	if err != nil {
 		return model.Index{}, err
 	}
@@ -147,24 +258,49 @@ func LoadCachedIndex() (model.Index, error) {
 	if err != nil {
 		return model.Index{}, err
 	}
+	var cached indexCacheEnvelope
+	if err := json.Unmarshal(data, &cached); err == nil && cached.FormatVersion == 1 {
+		if len(cached.RawIndex) == 0 {
+			return model.Index{}, errors.New("cached repository index is empty")
+		}
+		if config.RequireRepositorySignature() && len(cached.Signature) == 0 {
+			return model.Index{}, errors.New("cached repository index is unsigned; run yspm update")
+		}
+		if len(cached.Signature) > 0 {
+			if err := verifyIndexSignatureBytes(cached.RawIndex, cached.Signature); err != nil {
+				return model.Index{}, fmt.Errorf("cached repository signature verification failed: %w", err)
+			}
+		}
+		var idx model.Index
+		if err := json.Unmarshal(cached.RawIndex, &idx); err != nil {
+			return model.Index{}, fmt.Errorf("invalid cached repository index: %w", err)
+		}
+		if err := ValidateStableIndex(idx); err != nil {
+			return model.Index{}, fmt.Errorf("invalid cached repository index: %w", err)
+		}
+		return idx, nil
+	}
+
+	// Accept old unsigned cache files only when signatures are not required.
+	// An old cache cannot prove authenticity because it does not retain the exact
+	// signed bytes or detached signature.
+	if config.RequireRepositorySignature() {
+		return model.Index{}, errors.New("legacy cached index cannot be authenticated; run yspm update")
+	}
 	var idx model.Index
 	if err := json.Unmarshal(data, &idx); err != nil {
+		return model.Index{}, fmt.Errorf("invalid cached repository index: %w", err)
+	}
+	if err := ValidateStableIndex(idx); err != nil {
 		return model.Index{}, fmt.Errorf("invalid cached repository index: %w", err)
 	}
 	return idx, nil
 }
 
-func CurrentSystem() (string, string) { return runtime.GOOS, runtime.GOARCH }
-
 func SupportsArchitecture(p model.Package, requested string) bool {
 	requested = config.NormalizeArch(requested)
 	if p.Architecture == "" { return true }
 	return config.NormalizeArch(p.Architecture) == requested
-}
-
-func SupportsCurrentSystem(p model.Package) bool {
-	osName, arch := CurrentSystem()
-	return (p.OS == "" || p.OS == osName || (osName == "linux" && p.OS == "linux")) && SupportsArchitecture(p, arch)
 }
 
 func ValidateInstallPackage(p model.Package) error {
@@ -237,20 +373,35 @@ func Download(source, destination string) error {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return fmt.Errorf("download failed: HTTP %s", resp.Status)
 		}
-		return writeAtomic(resp.Body, destination)
+		if resp.ContentLength > maxDownloadBytes {
+			return fmt.Errorf("download size %d exceeds %d-byte limit", resp.ContentLength, maxDownloadBytes)
+		}
+		return writeAtomicLimit(resp.Body, destination, maxDownloadBytes)
 	}
 	if u, err := url.Parse(source); err == nil && u.Scheme == "file" {
 		source = u.Path
 	}
-	f, err := os.Open(source)
+	file, err := os.Open(source)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return writeAtomic(f, destination)
+	defer file.Close()
+	if info, err := file.Stat(); err != nil {
+		return err
+	} else if info.Size() > maxDownloadBytes {
+		return fmt.Errorf("download size %d exceeds %d-byte limit", info.Size(), maxDownloadBytes)
+	}
+	return writeAtomicLimit(file, destination, maxDownloadBytes)
 }
 
 func writeAtomic(r io.Reader, destination string) error {
+	return writeAtomicLimit(r, destination, maxDownloadBytes)
+}
+
+func writeAtomicLimit(r io.Reader, destination string, limit int64) (retErr error) {
+	if limit <= 0 {
+		return errors.New("invalid download size limit")
+	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
 	}
@@ -259,13 +410,30 @@ func writeAtomic(r io.Reader, destination string) error {
 		return err
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := io.Copy(tmp, r); err != nil {
-		_ = tmp.Close()
+	defer func() {
+		if cleanupErr := os.Remove(tmpPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove temporary download %s: %w", tmpPath, cleanupErr))
+		}
+	}()
+	n, err := io.Copy(tmp, io.LimitReader(r, limit+1))
+	if err != nil {
+		if closeErr := tmp.Close(); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("close partial download: %w", closeErr))
+		}
 		return err
 	}
+	if n > limit {
+		closeErr := tmp.Close()
+		limitErr := fmt.Errorf("download exceeds %d-byte limit", limit)
+		if closeErr != nil {
+			return errors.Join(limitErr, fmt.Errorf("close oversized download: %w", closeErr))
+		}
+		return limitErr
+	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
+		if closeErr := tmp.Close(); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("close unsynced download: %w", closeErr))
+		}
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -326,9 +494,6 @@ func (r *commandTarReadCloser) Close() error {
 func ExtractArchive(archivePath, format, destination string) error {
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "zip":
-		if err := os.MkdirAll(destination, 0o755); err != nil {
-			return err
-		}
 		return extractZip(archivePath, destination)
 	case "tar.gz", "tgz", "tar.xz", "tar.bz2", "tar.zst", "tar":
 		return extractTar(archivePath, format, destination)
@@ -356,7 +521,12 @@ func openTarStream(archivePath, format string) (io.ReadCloser, error) {
 		compression = "zstd"
 	case "tar":
 		var magic [6]byte
-		_, _ = file.ReadAt(magic[:], 0)
+		if _, readErr := file.ReadAt(magic[:], 0); readErr != nil && !errors.Is(readErr, io.EOF) {
+			if closeErr := file.Close(); closeErr != nil {
+				return nil, errors.Join(readErr, fmt.Errorf("close tar archive: %w", closeErr))
+			}
+			return nil, fmt.Errorf("inspect tar compression header: %w", readErr)
+		}
 		switch {
 		case magic[0] == 0x1f && magic[1] == 0x8b:
 			compression = "gzip"
@@ -368,12 +538,17 @@ func openTarStream(archivePath, format string) (io.ReadCloser, error) {
 			compression = "zstd"
 		}
 	default:
-		_ = file.Close()
-		return nil, fmt.Errorf("unsupported tar compression format %q", format)
+		unsupportedErr := fmt.Errorf("unsupported tar compression format %q", format)
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.Join(unsupportedErr, fmt.Errorf("close tar archive: %w", closeErr))
+		}
+		return nil, unsupportedErr
 	}
 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		_ = file.Close()
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("close tar archive: %w", closeErr))
+		}
 		return nil, err
 	}
 
@@ -383,8 +558,11 @@ func openTarStream(archivePath, format string) (io.ReadCloser, error) {
 	case "gzip":
 		reader, err := gzip.NewReader(file)
 		if err != nil {
-			_ = file.Close()
-			return nil, fmt.Errorf("open gzip archive: %w", err)
+			openErr := fmt.Errorf("open gzip archive: %w", err)
+			if closeErr := file.Close(); closeErr != nil {
+				return nil, errors.Join(openErr, fmt.Errorf("close archive: %w", closeErr))
+			}
+			return nil, openErr
 		}
 		return &tarReadCloser{Reader: reader, closers: []io.Closer{reader, file}}, nil
 	case "bzip2":
@@ -395,18 +573,28 @@ func openTarStream(archivePath, format string) (io.ReadCloser, error) {
 		cmd.Stdin = file
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			_ = file.Close()
+			if closeErr := file.Close(); closeErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("close tar archive: %w", closeErr))
+			}
 			return nil, err
 		}
 		if err := cmd.Start(); err != nil {
-			_ = stdout.Close()
-			_ = file.Close()
-			return nil, fmt.Errorf("start %s decompressor: %w", program, err)
+			startErr := fmt.Errorf("start %s decompressor: %w", program, err)
+			if closeErr := stdout.Close(); closeErr != nil {
+				startErr = errors.Join(startErr, fmt.Errorf("close decompressor pipe: %w", closeErr))
+			}
+			if closeErr := file.Close(); closeErr != nil {
+				startErr = errors.Join(startErr, fmt.Errorf("close tar archive: %w", closeErr))
+			}
+			return nil, startErr
 		}
 		return &commandTarReadCloser{ReadCloser: stdout, cmd: cmd, input: file}, nil
 	default:
-		_ = file.Close()
-		return nil, fmt.Errorf("unsupported tar compression %q", compression)
+		unsupportedErr := fmt.Errorf("unsupported tar compression %q", compression)
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.Join(unsupportedErr, fmt.Errorf("close tar archive: %w", closeErr))
+		}
+		return nil, unsupportedErr
 	}
 }
 
@@ -425,37 +613,38 @@ func spoolTarStream(archivePath, format string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	tmp, err := os.CreateTemp("", "yspm-validated-tar-*.tar")
 	if err != nil {
-		_ = source.Close()
+		if closeErr := source.Close(); closeErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("close source archive: %w", closeErr))
+		}
 		return nil, err
 	}
-	cleanup := func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
+	cleanup := func() error {
+		var cleanupErr error
+		if closeErr := tmp.Close(); closeErr != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("close temporary tar: %w", closeErr))
+		}
+		if removeErr := os.Remove(tmp.Name()); removeErr != nil && !os.IsNotExist(removeErr) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove temporary tar: %w", removeErr))
+		}
+		return cleanupErr
 	}
 
 	n, copyErr := io.Copy(tmp, io.LimitReader(source, maxTarStreamBytes+1))
 	closeErr := source.Close()
 	if n > maxTarStreamBytes {
-		cleanup()
-		return nil, fmt.Errorf("decompressed tar stream exceeds the %d-byte limit", maxTarStreamBytes)
+		limitErr := fmt.Errorf("decompressed tar stream exceeds the %d-byte limit", maxTarStreamBytes)
+		return nil, errors.Join(limitErr, closeErr, cleanup())
 	}
 	if copyErr != nil {
-		cleanup()
-		if closeErr != nil {
-			return nil, fmt.Errorf("read tar stream: %v; close decompressor: %w", copyErr, closeErr)
-		}
-		return nil, fmt.Errorf("read tar stream: %w", copyErr)
+		return nil, errors.Join(fmt.Errorf("read tar stream: %w", copyErr), closeErr, cleanup())
 	}
 	if closeErr != nil {
-		cleanup()
-		return nil, closeErr
+		return nil, errors.Join(closeErr, cleanup())
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		cleanup()
-		return nil, err
+		return nil, errors.Join(err, cleanup())
 	}
 	return tmp, nil
 }
@@ -534,7 +723,7 @@ func validateTarArchive(file *os.File) ([]tarArchiveEntry, error) {
 			if header.Size != 0 {
 				return nil, fmt.Errorf("directory entry %q has unexpected data", header.Name)
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if name == "." {
 				return nil, fmt.Errorf("regular file entry cannot name extraction root")
 			}
@@ -586,7 +775,7 @@ func validateTarArchive(file *os.File) ([]tarArchiveEntry, error) {
 		}
 		if entry.typeflag == tar.TypeLink {
 			target, ok := byName[entry.linkname]
-			if !ok || (target.typeflag != tar.TypeReg && target.typeflag != tar.TypeRegA) {
+			if !ok || (target.typeflag != tar.TypeReg) {
 				return nil, fmt.Errorf("hardlink %q must target a regular file in the same archive", entry.name)
 			}
 		}
@@ -650,7 +839,7 @@ func ensureTarDirectories(root, relative string) (string, error) {
 	return current, nil
 }
 
-func extractTar(archivePath, format, destination string) error {
+func extractTar(archivePath, format, destination string) (retErr error) {
 	// Decompress once into a bounded private file, then validate all members
 	// before creating any archive-controlled filesystem entries.
 	archive, err := spoolTarStream(archivePath, format)
@@ -659,8 +848,12 @@ func extractTar(archivePath, format, destination string) error {
 	}
 	defer func() {
 		name := archive.Name()
-		_ = archive.Close()
-		_ = os.Remove(name)
+		if closeErr := archive.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close validated tar: %w", closeErr))
+		}
+		if removeErr := os.Remove(name); removeErr != nil && !os.IsNotExist(removeErr) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove validated tar %s: %w", name, removeErr))
+		}
 	}()
 
 	entries, err := validateTarArchive(archive)
@@ -703,7 +896,7 @@ func extractTar(archivePath, format, destination string) error {
 				return err
 			}
 			directoryEntries = append(directoryEntries, entry)
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			parent, err := ensureTarDirectories(root, pathpkg.Dir(entry.name))
 			if err != nil {
 				return err
@@ -716,11 +909,16 @@ func extractTar(archivePath, format, destination string) error {
 			_, copyErr := io.CopyN(out, reader, entry.size)
 			closeErr := out.Close()
 			if copyErr != nil {
-				_ = os.Remove(target)
-				return fmt.Errorf("extract archive file %q: %w", entry.name, copyErr)
+				copyErr = fmt.Errorf("extract archive file %q: %w", entry.name, copyErr)
+				if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+					copyErr = errors.Join(copyErr, fmt.Errorf("remove partial archive file %s: %w", target, removeErr))
+				}
+				return copyErr
 			}
 			if closeErr != nil {
-				_ = os.Remove(target)
+				if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+					return errors.Join(closeErr, fmt.Errorf("remove incomplete archive file %s: %w", target, removeErr))
+				}
 				return closeErr
 			}
 			if err := os.Chmod(target, os.FileMode(entry.mode)&0o777); err != nil {
@@ -787,50 +985,130 @@ func extractTar(archivePath, format, destination string) error {
 	return nil
 }
 
-func extractZip(archivePath, destination string) error {
+func extractZip(archivePath, destination string) (retErr error) {
 	r, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return err
 	}
-	defer r.Close()
-	for _, f := range r.File {
-		name := filepath.Clean(f.Name)
-		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
-			return fmt.Errorf("unsafe archive path %q", f.Name)
+	defer func() {
+		if closeErr := r.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close ZIP archive: %w", closeErr))
 		}
-		target := filepath.Join(destination, name)
-		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(destination)+string(os.PathSeparator)) && target != destination {
-			return fmt.Errorf("archive escapes destination: %q", f.Name)
+	}()
+	if len(r.File) > maxZipEntries {
+		return fmt.Errorf("ZIP archive exceeds the %d-entry limit", maxZipEntries)
+	}
+
+	type zipEntry struct {
+		file *zip.File
+		name string
+	}
+	entries := make([]zipEntry, 0, len(r.File))
+	byName := make(map[string]zipEntry, len(r.File))
+	var expanded uint64
+	for _, f := range r.File {
+		name, err := normalizeTarPath(f.Name)
+		if err != nil {
+			return err
+		}
+		if name == "." && !f.FileInfo().IsDir() {
+			return fmt.Errorf("ZIP file entry cannot name extraction root")
+		}
+		if _, exists := byName[name]; exists {
+			return fmt.Errorf("duplicate ZIP archive path %q", name)
+		}
+		entry := zipEntry{file: f, name: name}
+		byName[name] = entry
+		if f.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("ZIP symlink entries are not supported: %q", f.Name)
 		}
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
+			if f.UncompressedSize64 != 0 {
+				return fmt.Errorf("ZIP directory entry %q has unexpected data", f.Name)
 			}
+		} else {
+			if f.UncompressedSize64 > maxZipEntryBytes {
+				return fmt.Errorf("ZIP entry %q exceeds the per-file size limit", name)
+			}
+			if expanded > maxZipExpandedBytes-f.UncompressedSize64 {
+				return fmt.Errorf("ZIP archive exceeds the expanded-size limit")
+			}
+			expanded += f.UncompressedSize64
+		}
+		entries = append(entries, entry)
+	}
+	for _, entry := range entries {
+		for parent := pathpkg.Dir(entry.name); parent != "." && parent != "/"; parent = pathpkg.Dir(parent) {
+			if parentEntry, exists := byName[parent]; exists && !parentEntry.file.FileInfo().IsDir() {
+				return fmt.Errorf("ZIP path %q is nested beneath non-directory entry %q", entry.name, parent)
+			}
+		}
+	}
+
+	root, err := prepareTarDestination(destination)
+	if err != nil {
+		return err
+	}
+	var dirs []zipEntry
+	for _, entry := range entries {
+		if entry.name == "." {
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
+		if entry.file.FileInfo().IsDir() {
+			if _, err := ensureTarDirectories(root, entry.name); err != nil {
+				return err
+			}
+			dirs = append(dirs, entry)
+			continue
 		}
-		in, err := f.Open()
+		parent, err := ensureTarDirectories(root, pathpkg.Dir(entry.name))
 		if err != nil {
 			return err
 		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		target := filepath.Join(parent, filepath.Base(filepath.FromSlash(entry.name)))
+		in, err := entry.file.Open()
 		if err != nil {
-			_ = in.Close()
 			return err
 		}
-		_, copyErr := io.Copy(out, in)
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			if closeErr := in.Close(); closeErr != nil {
+				return errors.Join(err, fmt.Errorf("close ZIP entry %s: %w", entry.name, closeErr))
+			}
+			return err
+		}
+		n, copyErr := io.CopyN(out, in, int64(entry.file.UncompressedSize64))
 		closeOutErr := out.Close()
 		closeInErr := in.Close()
 		if copyErr != nil {
+			copyErr = fmt.Errorf("extract ZIP entry %q after %d bytes: %w", entry.name, n, copyErr)
+			if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+				copyErr = errors.Join(copyErr, fmt.Errorf("remove partial ZIP entry %s: %w", target, removeErr))
+			}
 			return copyErr
 		}
 		if closeOutErr != nil {
+			if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+				return errors.Join(closeOutErr, fmt.Errorf("remove incomplete ZIP entry %s: %w", target, removeErr))
+			}
 			return closeOutErr
 		}
 		if closeInErr != nil {
+			if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+				return errors.Join(closeInErr, fmt.Errorf("remove incomplete ZIP entry %s: %w", target, removeErr))
+			}
 			return closeInErr
+		}
+		if err := os.Chmod(target, entry.file.Mode().Perm()&0o777); err != nil {
+			return err
+		}
+	}
+	sort.Slice(dirs, func(i, j int) bool {
+		return strings.Count(dirs[i].name, "/") > strings.Count(dirs[j].name, "/")
+	})
+	for _, entry := range dirs {
+		if err := os.Chmod(filepath.Join(root, filepath.FromSlash(entry.name)), entry.file.Mode().Perm()&0o777); err != nil {
+			return err
 		}
 	}
 	return nil

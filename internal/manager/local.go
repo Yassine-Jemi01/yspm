@@ -57,21 +57,29 @@ func (m *Manager) InstallLocal(paths []string, yes, autoSnapshot bool) error {
 			plan,err=m.resolve(idx,db,requested,false);if err!=nil{return err}
 		}
 		if !yes{printInstallPlan(plan,db);if !confirm("Continue? [y/N] "){fmt.Println("Aborted.");return nil}}
-		snapshotID:="";if autoSnapshot&&!m.User{snapshotID,_=CreateSnapshot(m)}
-		tx:=m.startTransaction("install-local",requested,snapshotID)
-		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer cleanupStaged(staged)
+		snapshotID := ""
+		if autoSnapshot && !m.User {
+			snapshotID, err = CreateSnapshot(m)
+			if err != nil { return fmt.Errorf("create pre-install snapshot: %w", err) }
+		}
+		tx, err := m.startTransaction("install-local",requested,snapshotID); if err != nil { return err }
+		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer func() {
+			if cleanupErr := cleanupStaged(staged); cleanupErr != nil {
+				fmt.Fprintf(os.Stderr, "yspm: staging cleanup failed: %v\n", cleanupErr)
+			}
+		}()
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		rb:=&transactionRollback{}
 		for _,sp:=range staged{
-			if err:=m.runScript(sp,"preinstall");err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-			if err:=m.commitPackage(sp,db,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+			if err:=m.runScript(sp,"preinstall");err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
+			if err:=m.commitPackage(sp,db,rb);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
 			hook:="postinstall";if sp.HardcoreLegacy{hook="install"}
-			if err:=m.runScript(sp,hook);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-			if err:=ApplyServices(m,sp.Pkg);err!=nil{rb.rollback();return m.finishFailed(tx,err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+			if err:=m.runScript(sp,hook);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
+			if err:=ApplyServices(m,sp.Pkg);err!=nil{return m.finishFailedWithRollback(tx, rb, err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
 			ip:=m.installedFromStage(sp);ip.Explicit=containsName(requested,sp.Pkg.Name);db.Packages[sp.Pkg.Name]=ip
-			for _,old:=range sp.Pkg.Replaces{if _,ok:=db.Packages[old];ok{delete(db.Packages,old)}}
+			for _, old := range sp.Pkg.Replaces { delete(db.Packages, old) }
 		}
-		if err:=store.SaveDBFor(m.User,db);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
-		rb.finalize();return m.finishSuccess(tx)
+		if err:=store.SaveDBFor(m.User,db);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
+		return m.finishCommitted(tx, rb.finalize())
 	})
 }
