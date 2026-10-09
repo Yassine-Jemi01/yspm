@@ -726,7 +726,7 @@ func validateTarArchive(file *os.File) ([]tarArchiveEntry, error) {
 			if header.Size != 0 {
 				return nil, fmt.Errorf("directory entry %q has unexpected data", header.Name)
 			}
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg, tar.TypeReg:
 			if name == "." {
 				return nil, fmt.Errorf("regular file entry cannot name extraction root")
 			}
@@ -778,7 +778,7 @@ func validateTarArchive(file *os.File) ([]tarArchiveEntry, error) {
 		}
 		if entry.typeflag == tar.TypeLink {
 			target, ok := byName[entry.linkname]
-			if !ok || (target.typeflag != tar.TypeReg && target.typeflag != tar.TypeRegA) {
+			if !ok || (target.typeflag != tar.TypeReg && target.typeflag != tar.TypeReg) {
 				return nil, fmt.Errorf("hardlink %q must target a regular file in the same archive", entry.name)
 			}
 		}
@@ -899,7 +899,7 @@ func extractTar(archivePath, format, destination string) (retErr error) {
 				return err
 			}
 			directoryEntries = append(directoryEntries, entry)
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg, tar.TypeReg:
 			parent, err := ensureTarDirectories(root, pathpkg.Dir(entry.name))
 			if err != nil {
 				return err
