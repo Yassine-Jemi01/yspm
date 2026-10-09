@@ -44,3 +44,9 @@ func TestValueAfterSupportsBothArchForms(t *testing.T) {
 		})
 	}
 }
+
+func TestIsLocalArchiveArgRecognizesZip(t *testing.T) {
+	if !isLocalArchiveArg("./download/package.ZIP") {
+		t.Fatal("ZIP archives should be recognized as local archive arguments")
+	}
+}
