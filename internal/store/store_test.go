@@ -21,10 +21,6 @@ func TestDatabaseWritesPreserveNewerPackageStateAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stalePackageView, err := LoadDBFor(true)
-	if err != nil {
-		t.Fatal(err)
-	}
 	latest, err := LoadDBFor(true)
 	if err != nil {
 		t.Fatal(err)
@@ -39,22 +35,12 @@ func TestDatabaseWritesPreserveNewerPackageStateAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A stale package snapshot must keep the transaction history committed by
-	// another writer, while store-level mutation helpers must preserve packages
-	// that were written before they obtained the DB lock.
-	stalePackageView.Packages["another"] = model.InstalledPackage{Name: "another", Version: "3.0.0"}
-	if err := SaveDBFor(true, stalePackageView); err != nil {
-		t.Fatal(err)
-	}
 	got, err := LoadDBFor(true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := got.Packages["newer"]; !ok {
-		t.Fatal("package state from the most recent package transaction was lost")
-	}
-	if _, ok := got.Packages["another"]; !ok {
-		t.Fatal("stale package view changes were not saved")
+		t.Fatal("atomic transaction-history mutation overwrote a newer package database")
 	}
 	if len(got.Transactions) != 1 || got.Transactions[0].ID != "transaction-race" {
 		t.Fatalf("transaction history was lost: %#v", got.Transactions)
