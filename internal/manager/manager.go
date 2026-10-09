@@ -377,7 +377,7 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 	}
 	if err:=os.MkdirAll(m.Paths.Cache,0o755);err!=nil{return nil,err};if err:=os.MkdirAll(m.Paths.Staging,0o755);err!=nil{return nil,err}
 	sem:=make(chan struct{},4);results:=make([]stagedPackage,len(pkgs));var wg sync.WaitGroup;errCh:=make(chan error,len(pkgs))
-	for i,p:=range pkgs{i,p=i,p;wg.Add(1);go func(){defer wg.Done();sem<-struct{}{};defer func(){<-sem}()
+	for i,p:=range pkgs{wg.Add(1);go func(){defer wg.Done();sem<-struct{}{};defer func(){<-sem}()
 		sp:=stagedPackage{Pkg:p,Scripts:map[string]string{}};archive:=filepath.Join(m.Paths.Cache,packageFilename(p))
 		if p.URL==""&&p.Kind!="meta"{errCh<-fmt.Errorf("package %s has no URL",p.Name);return}
 		valid:=false
