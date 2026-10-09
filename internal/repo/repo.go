@@ -912,11 +912,16 @@ func extractTar(archivePath, format, destination string) (retErr error) {
 			_, copyErr := io.CopyN(out, reader, entry.size)
 			closeErr := out.Close()
 			if copyErr != nil {
-				_ = os.Remove(target)
-				return fmt.Errorf("extract archive file %q: %w", entry.name, copyErr)
+				copyErr = fmt.Errorf("extract archive file %q: %w", entry.name, copyErr)
+				if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+					copyErr = errors.Join(copyErr, fmt.Errorf("remove partial archive file %s: %w", target, removeErr))
+				}
+				return copyErr
 			}
 			if closeErr != nil {
-				_ = os.Remove(target)
+				if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+					return errors.Join(closeErr, fmt.Errorf("remove incomplete archive file %s: %w", target, removeErr))
+				}
 				return closeErr
 			}
 			if err := os.Chmod(target, os.FileMode(entry.mode)&0o777); err != nil {
