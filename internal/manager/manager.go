@@ -724,7 +724,7 @@ func (m *Manager) Check()error{
 		for _,e:=range p.Manifest{
 			if e.Type=="dir"{continue}
 			target:=filepath.Join(m.Paths.Root,filepath.FromSlash(e.Path))
-			info,err:=os.Lstat(target)
+			_,err:=os.Lstat(target)
 			if os.IsNotExist(err){fmt.Printf("%s: missing %s\n",name,e.Path);problems++;continue}
 			if err!=nil{fmt.Printf("%s: cannot stat %s: %v\n",name,e.Path,err);problems++;continue}
 			if e.Type=="symlink"{got,err:=os.Readlink(target);if err!=nil||got!=e.LinkTarget{fmt.Printf("%s: symlink mismatch %s\n",name,e.Path);problems++};continue}
