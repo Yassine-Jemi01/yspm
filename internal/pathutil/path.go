@@ -1,6 +1,9 @@
 package pathutil
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // Within reports whether target resolves lexically to root or a path below it.
 func Within(root, target string) bool {
@@ -8,5 +11,5 @@ func Within(root, target string) bool {
 	if err != nil {
 		return false
 	}
-	return rel == "." || (rel != ".." && !filepath.IsAbs(rel) && len(rel) > 2 && rel[:3] != ".."+string(filepath.Separator)) || rel == ".."
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
 }
