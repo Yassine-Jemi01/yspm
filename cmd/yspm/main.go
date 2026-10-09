@@ -80,9 +80,13 @@ func main() {
 	if cmd == "__worker" {
 		if len(args) < 3 { fatal("invalid worker arguments") }
 		action,id := args[0],args[1]
-		packed:=""
-		if args[2]=="--"&&len(args)>3{packed=args[3]}
-		if err:=m.Worker(action,id,packed,true,has(os.Args[2:],"--snapshot"));err!=nil{fatal(err.Error())}
+		var workerArgs []string
+		if args[2] == "--" && len(args) > 3 {
+			workerArgs = append(workerArgs, args[3:]...)
+		}
+		if err := m.Worker(action, id, workerArgs, true, has(os.Args[2:], "--snapshot")); err != nil {
+			fatal(err.Error())
+		}
 		return
 	}
 
