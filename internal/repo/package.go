@@ -14,10 +14,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	pathpkg "path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -181,7 +179,7 @@ func ExtractPackage(path, destination string) error {
 			return fmt.Errorf("unsafe package path %q", h.Name)
 		}
 		target := filepath.Join(root, rel)
-		if !withinRoot(root, target) {
+		if !WithinRoot(root, target) {
 			return fmt.Errorf("package escapes destination: %q", h.Name)
 		}
 		switch h.Typeflag {
@@ -219,7 +217,7 @@ func ExtractPackage(path, destination string) error {
 		case tar.TypeLink:
 			linkName := strings.TrimPrefix(filepath.ToSlash(h.Linkname), "root/")
 			link := filepath.Clean(filepath.Join(root, filepath.FromSlash(linkName)))
-			if !withinRoot(root, link) {
+			if !WithinRoot(root, link) {
 				return fmt.Errorf("hardlink escapes destination: %q", h.Linkname)
 			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -434,7 +432,7 @@ func scanELFRequirements(root string) ([]string, []string) {
 	return req, prov
 }
 
-func withinRoot(root, target string) bool {
+func WithinRoot(root, target string) bool {
 	rel, err := filepath.Rel(root, target)
 	if err != nil { return false }
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
@@ -498,27 +496,6 @@ func GenerateKeypair(publicPath, privatePath string) error {
 	if err != nil { return err }
 	if err := os.WriteFile(publicPath, []byte(hex.EncodeToString(pub)+"\n"), 0o644); err != nil { return err }
 	return os.WriteFile(privatePath, []byte(hex.EncodeToString(priv)+"\n"), 0o600)
-}
-
-func MakePackageURL(dir, name string) string {
-	return "file://" + filepath.ToSlash(filepath.Join(dir, name))
-}
-
-func EncodeArchitecture(a string) string {
-	if a == "" { return "" }
-	return strings.ToLower(strings.TrimSpace(a))
-}
-
-func ParseSize(s string) int64 {
-	s = strings.TrimSpace(strings.ToLower(s))
-	mult := int64(1)
-	switch {
-	case strings.HasSuffix(s,"kib"): mult=1024; s=strings.TrimSuffix(s,"kib")
-	case strings.HasSuffix(s,"mib"): mult=1024*1024; s=strings.TrimSuffix(s,"mib")
-	case strings.HasSuffix(s,"gib"): mult=1024*1024*1024; s=strings.TrimSuffix(s,"gib")
-	}
-	v, _ := strconv.ParseFloat(strings.TrimSpace(s),64)
-	return int64(v*float64(mult))
 }
 
 func Manifest(root string) ([]model.FileEntry, error) { return filesystemManifest(root) }
