@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-18",
+  "generated": "2026-10-09",
   "packages": [
     {
       "name": "firefox",
@@ -15,7 +15,8 @@
       "format": "tar.xz",
       "entry": "firefox",
       "command": "firefox",
-      "homepage": "https://www.mozilla.org/firefox/"
+      "homepage": "https://www.mozilla.org/firefox/",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "brave",
@@ -31,22 +32,25 @@
       "format": "zip",
       "entry": "brave",
       "command": "brave-browser",
-      "homepage": "https://brave.com/linux/"
+      "homepage": "https://brave.com/linux/",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "vscode",
-      "version": "1.138.0",
+      "version": "1.141.0",
       "description": "Visual Studio Code",
       "os": "linux",
       "architecture": "amd64",
       "license": "Microsoft product license",
-      "url": "https://update.code.visualstudio.com/1.138.0/linux-x64/stable",
+      "url": "https://vscode.download.prss.microsoft.com/dbazure/download/stable/2a59476c9bfcb90b3ddc372c36762471b7dfad1c/code-stable-x64-1791276637.tar.gz",
       "dependencies": [],
       "kind": "app",
       "format": "tar.gz",
       "entry": "VSCode-linux-x64/code",
       "command": "code",
-      "homepage": "https://code.visualstudio.com/"
+      "homepage": "https://code.visualstudio.com/",
+      "abi": "yspm-abi-1",
+      "sha256": "d77d588f0454cbaaa71e723497de4160d15b95fba4988abe177b1432e6bd570a"
     },
     {
       "name": "obsidian",
@@ -62,7 +66,8 @@
       "entry": "Obsidian-1.13.7.AppImage",
       "command": "obsidian",
       "homepage": "https://obsidian.md/",
-      "sha256": "e0d8e0a611624de8c9c7dcd8a9e648279fb0a0d552faa1312b7e4f3a5fa72663"
+      "sha256": "e0d8e0a611624de8c9c7dcd8a9e648279fb0a0d552faa1312b7e4f3a5fa72663",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "ripgrep",
@@ -78,7 +83,8 @@
       "format": "tar.gz",
       "entry": "rg",
       "command": "rg",
-      "homepage": "https://github.com/BurntSushi/ripgrep"
+      "homepage": "https://github.com/BurntSushi/ripgrep",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "fzf",
@@ -94,7 +100,8 @@
       "format": "tar.gz",
       "entry": "fzf",
       "command": "fzf",
-      "homepage": "https://github.com/junegunn/fzf"
+      "homepage": "https://github.com/junegunn/fzf",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "fd",
@@ -110,7 +117,8 @@
       "format": "tar.gz",
       "entry": "fd",
       "command": "fd",
-      "homepage": "https://github.com/sharkdp/fd"
+      "homepage": "https://github.com/sharkdp/fd",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "bat",
@@ -126,7 +134,8 @@
       "format": "tar.gz",
       "entry": "bat",
       "command": "bat",
-      "homepage": "https://github.com/sharkdp/bat"
+      "homepage": "https://github.com/sharkdp/bat",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "zoxide",
@@ -142,7 +151,8 @@
       "format": "tar.gz",
       "entry": "zoxide",
       "command": "zoxide",
-      "homepage": "https://github.com/ajeetdsouza/zoxide"
+      "homepage": "https://github.com/ajeetdsouza/zoxide",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "lazygit",
@@ -158,7 +168,8 @@
       "format": "tar.gz",
       "entry": "lazygit",
       "command": "lazygit",
-      "homepage": "https://github.com/jesseduffield/lazygit"
+      "homepage": "https://github.com/jesseduffield/lazygit",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "delta",
@@ -174,7 +185,8 @@
       "format": "tar.gz",
       "entry": "delta",
       "command": "delta",
-      "homepage": "https://github.com/dandavison/delta"
+      "homepage": "https://github.com/dandavison/delta",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "eza",
@@ -190,7 +202,8 @@
       "format": "tar.gz",
       "entry": "eza",
       "command": "eza",
-      "homepage": "https://github.com/eza-community/eza"
+      "homepage": "https://github.com/eza-community/eza",
+      "abi": "yspm-abi-1"
     },
     {
       "name": "devkit",
@@ -207,12 +220,14 @@
         "eza"
       ],
       "kind": "meta",
-      "homepage": "https://github.com/Yassine-Jemi01/yspm"
+      "homepage": "https://github.com/Yassine-Jemi01/yspm",
+      "abi": "yspm-abi-1"
     }
   ],
   "release": "1",
   "channel": "stable",
   "release_date": "2026-09-18",
   "eol": "2027-09-18",
-  "repository": "YSSN Community Repository"
+  "repository": "YSSN Community Repository",
+  "abi": "yspm-abi-1"
 }

@@ -171,17 +171,41 @@ func ValidateInstallPackage(p model.Package) error {
 	if p.Kind == "meta" {
 		return nil
 	}
-	if strings.TrimSpace(p.SHA256) == "" {
+	if strings.TrimSpace(p.Name) == "" {
+		return errors.New("package is missing a name")
+	}
+	if strings.TrimSpace(p.ABI) == "" {
+		return fmt.Errorf("package %q has no ABI identifier", p.Name)
+	}
+	checksum := strings.TrimSpace(p.SHA256)
+	if checksum == "" {
 		return fmt.Errorf("package %q has no SHA-256 checksum", p.Name)
 	}
-	if len(strings.TrimSpace(p.SHA256)) != 64 {
-		return fmt.Errorf("package %q has an invalid SHA-256 checksum", p.Name)
+	if len(checksum) != sha256.Size*2 {
+		return fmt.Errorf("package %q has an invalid SHA-256 checksum: expected %d hexadecimal characters", p.Name, sha256.Size*2)
 	}
-	if _, err := hex.DecodeString(p.SHA256); err != nil {
-		return fmt.Errorf("package %q has an invalid SHA-256 checksum", p.Name)
+	if _, err := hex.DecodeString(checksum); err != nil {
+		return fmt.Errorf("package %q has an invalid SHA-256 checksum: %w", p.Name, err)
 	}
-	if p.URL == "" {
+	rawURL := strings.TrimSpace(p.URL)
+	if rawURL == "" {
 		return fmt.Errorf("package %q has no download URL", p.Name)
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" {
+		return fmt.Errorf("package %q has an invalid download URL", p.Name)
+	}
+	switch u.Scheme {
+	case "https", "http":
+		if u.Host == "" {
+			return fmt.Errorf("package %q has a download URL without a host", p.Name)
+		}
+	case "file":
+		if u.Path == "" {
+			return fmt.Errorf("package %q has an empty local file URL", p.Name)
+		}
+	default:
+		return fmt.Errorf("package %q uses unsupported download URL scheme %q", p.Name, u.Scheme)
 	}
 	return nil
 }

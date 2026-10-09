@@ -36,6 +36,7 @@ func FetchHardcoreIndex(source string) (model.Index, error) {
 		Release:    "hardcore-main",
 		Channel:    "stable",
 		Generated:  time.Now().UTC().Format(time.RFC3339),
+		ABI:        "hardcore-legacy",
 	}
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
 	lineNo := 0
@@ -63,6 +64,7 @@ func FetchHardcoreIndex(source string) (model.Index, error) {
 			Name: name, Version: "legacy", Description: "HardcoreLinux legacy package",
 			OS: "linux", Architecture: "", License: "unknown", Kind: "system",
 			Format: HardcorePackageFormat,
+			ABI: "hardcore-legacy",
 			URL: strings.TrimRight(base, "/") + "/" + filename,
 			SHA256: checksum,
 		})
