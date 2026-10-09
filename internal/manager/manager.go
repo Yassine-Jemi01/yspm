@@ -202,9 +202,12 @@ func (m *Manager) runTransaction(action string,requested []string,yes,upgrade,au
 		plan,err:=m.resolve(idx,db,requested,upgrade);if err!=nil{return err}
 		if len(plan.Packages)==0{fmt.Println("Nothing to do.");return store.SaveDBFor(m.User,db)}
 		if !yes{printInstallPlan(plan,db);if !confirm("Continue? [y/N] "){fmt.Println("Aborted.");return nil}}
-		snapshotID:=""
-		if autoSnapshot&&!m.User{
-			snapshotID,_=CreateSnapshot(m)
+		snapshotID := ""
+		if autoSnapshot && !m.User {
+			snapshotID, err = CreateSnapshot(m)
+			if err != nil {
+				return fmt.Errorf("create pre-transaction snapshot: %w", err)
+			}
 		}
 		tx, err := m.startTransaction(action,namesFromPackages(plan.Packages),snapshotID); if err != nil { return err }
 		staged,err:=m.prepare(plan.Packages)
@@ -511,7 +514,11 @@ func (m *Manager) RemoveMany(names []string,yes,autoSnapshot bool)error{
 			for otherName,other:=range db.Packages{if otherName==name||containsName(names,otherName){continue};if dependsOn(other.Dependencies,name){return fmt.Errorf("cannot remove %q: installed package %q depends on it",name,otherName)}}
 		}
 		if !yes{fmt.Printf("Remove %s? [y/N] ",strings.Join(names,", "));if !confirm(""){fmt.Println("Aborted.");return nil}}
-		if autoSnapshot&&!m.User{_,_=CreateSnapshot(m)}
+		if autoSnapshot && !m.User {
+			if _, err := CreateSnapshot(m); err != nil {
+				return fmt.Errorf("create pre-removal snapshot: %w", err)
+			}
+		}
 		tx, err := m.startTransaction("remove",names,""); if err != nil { return err }
 		rb:=&transactionRollback{}
 		for _,name:=range names{
@@ -608,7 +615,12 @@ func (m *Manager) UpgradeRelease(release string,yes,autoSnapshot bool)error{
 		plan,err:=m.resolve(idx,db,nil,true);if err!=nil{return fmt.Errorf("release resolution failed: %w",err)}
 		oldRepo:=m.repository;m.repository=url;defer func(){m.repository=oldRepo}()
 		tx, err := m.startTransaction("release-upgrade",namesFromPackages(plan.Packages),""); if err != nil { return err }
-		rb:=&transactionRollback{};if autoSnapshot&&!m.User{_,_=CreateSnapshot(m)}
+		rb := &transactionRollback{}
+		if autoSnapshot && !m.User {
+			if _, err := CreateSnapshot(m); err != nil {
+				return fmt.Errorf("create pre-release-upgrade snapshot: %w", err)
+			}
+		}
 		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer cleanupStaged(staged)
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		for _,sp:=range staged{if err:=m.commitPackage(sp,db,rb);err!=nil{return m.finishFailedWithRollback(tx, rb, err)};db.Packages[sp.Pkg.Name]=m.installedFromStage(sp)}
@@ -676,23 +688,106 @@ func (m *Manager) finishCommitted(tx model.Transaction, cleanupErr error) error 
 	return statusErr
 }
 
-func (m *Manager) RunBackground(action string,args []string,yes,autoSnapshot bool)error{
-	if !m.User{if err:=m.requirePrivileges("background "+action);err!=nil{return err}}
-	tx, err := m.startTransaction(action,args,"");logDir:=m.Paths.Transactions;if err:=os.MkdirAll(logDir,0o755);err!=nil{return err};logFile,err:=os.OpenFile(filepath.Join(logDir,tx.ID+".log"),os.O_CREATE|os.O_WRONLY|os.O_TRUNC,0o644); if err != nil { return err };if err!=nil{return err}
-	cmd:=exec.Command(os.Args[0],"__worker",action,tx.ID,"--",strings.Join(args,"\x00"));cmd.Stdout=logFile;cmd.Stderr=logFile;cmd.Env=os.Environ();cmd.Env=append(cmd.Env,"YSPM_USER="+boolText(m.User),"YSPM_ARCH="+m.arch);if err:=cmd.Start();err!=nil{_ = logFile.Close();return err};_ = logFile.Close();fmt.Printf("Transaction %s started in background.\n",tx.ID);return nil
-}
-func (m *Manager) Worker(action,id,packed string,yes,autoSnapshot bool)error{
-	args:=[]string{};if packed!=""{args=strings.Split(packed,"\x00")};var err error
-	switch action{
-	case "install":
-		local:=false;for _,a:=range args{if strings.HasSuffix(strings.ToLower(a),".yspkg"){local=true;break}}
-		if local{err=m.InstallLocal(args,true,autoSnapshot)}else{err=m.InstallMany(args,true,autoSnapshot)}
-	case "remove":err=m.RemoveMany(args,true,autoSnapshot)
-	case "upgrade":err=m.Upgrade(true,autoSnapshot)
-	default:err=fmt.Errorf("unsupported background action %q",action)
+func (m *Manager) RunBackground(action string, args []string, yes, autoSnapshot bool) error {
+	if !m.User {
+		if err := m.requirePrivileges("background " + action); err != nil {
+			return err
+		}
 	}
-	tx,e:=store.GetTransactionFor(m.User,id);if e==nil{if err==nil{tx.Status="success"}else{tx.Status="failed";tx.Error=err.Error()};tx.FinishedAt=time.Now();_=store.UpdateTransactionFor(m.User,tx)}
-	return err
+	if !yes && !confirm("Start background " + action + " transaction? [y/N] ") {
+		fmt.Println("Aborted.")
+		return nil
+	}
+	tx, err := m.startTransaction(action, args, "")
+	if err != nil {
+		return err
+	}
+	logDir := m.Paths.Transactions
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return m.finishFailed(tx, fmt.Errorf("create transaction log directory: %w", err))
+	}
+	logFile, err := os.OpenFile(filepath.Join(logDir, tx.ID+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return m.finishFailed(tx, fmt.Errorf("open transaction log: %w", err))
+	}
+	workerArgs := []string{"__worker", action, tx.ID}
+	if autoSnapshot {
+		workerArgs = append(workerArgs, "--snapshot")
+	}
+	workerArgs = append(workerArgs, "--", strings.Join(args, "\x00"))
+	cmd := exec.Command(os.Args[0], workerArgs...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Env = append(os.Environ(), "YSPM_USER="+boolText(m.User), "YSPM_ARCH="+m.arch)
+	if err := cmd.Start(); err != nil {
+		closeErr := logFile.Close()
+		startErr := fmt.Errorf("start background worker: %w", err)
+		if closeErr != nil {
+			startErr = errors.Join(startErr, fmt.Errorf("close transaction log: %w", closeErr))
+		}
+		return m.finishFailed(tx, startErr)
+	}
+	if err := logFile.Close(); err != nil {
+		return fmt.Errorf("background worker started, but transaction log close failed: %w", err)
+	}
+	fmt.Printf("Transaction %s started in background.\n", tx.ID)
+	return nil
+}
+
+func (m *Manager) Worker(action, id, packed string, yes, autoSnapshot bool) error {
+	args := []string{}
+	if packed != "" {
+		args = strings.Split(packed, "\x00")
+	}
+	var operationErr error
+	switch action {
+	case "install":
+		local := false
+		for _, a := range args {
+			if isLocalArchivePath(a) {
+				local = true
+				break
+			}
+		}
+		if local {
+			operationErr = m.InstallLocal(args, true, autoSnapshot)
+		} else {
+			operationErr = m.InstallMany(args, true, autoSnapshot)
+		}
+	case "remove":
+		operationErr = m.RemoveMany(args, true, autoSnapshot)
+	case "upgrade":
+		operationErr = m.Upgrade(true, autoSnapshot)
+	case "autoremove":
+		operationErr = m.Autoremove(true, autoSnapshot)
+	default:
+		operationErr = fmt.Errorf("unsupported background action %q", action)
+	}
+	tx, err := store.GetTransactionFor(m.User, id)
+	if err != nil {
+		return errors.Join(operationErr, fmt.Errorf("load background transaction record: %w", err))
+	}
+	if operationErr == nil {
+		tx.Status = "success"
+	} else {
+		tx.Status = "failed"
+		tx.Error = operationErr.Error()
+	}
+	tx.FinishedAt = time.Now()
+	if err := store.UpdateTransactionFor(m.User, tx); err != nil {
+		return errors.Join(operationErr, fmt.Errorf("update background transaction record: %w", err))
+	}
+	return operationErr
+}
+
+func isLocalArchivePath(path string) bool {
+	x := strings.ToLower(strings.TrimSpace(path))
+	for _, suffix := range []string{".yspkg", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.zst", ".zip"} {
+		if strings.HasSuffix(x, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) runInstalledHookFromArchive(_ model.InstalledPackage,_ string)error{return nil}
