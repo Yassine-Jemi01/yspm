@@ -126,7 +126,6 @@ func NormalizeArch(a string) string {
 	}
 }
 
-func HostOS() string { return runtime.GOOS }
 func HostArch() string { return NormalizeArch(runtime.GOARCH) }
 
 // CacheDirFor uses the same explicit system/user mode as the package
