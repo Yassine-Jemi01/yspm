@@ -21,6 +21,8 @@ jobs:
         run: |
           files="
           internal/pathutil/path.go
+          internal/pathutil/path_test.go
+          internal/config/config_test.go
           internal/manager/lock.go
           internal/manager/lock_test.go
           internal/manager/dependency_parse_test.go
