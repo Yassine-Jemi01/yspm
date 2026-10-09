@@ -143,7 +143,9 @@ func (m *Manager) printDependencyTree(name string,idx model.Index,prefix string,
 		r:=parseDependency(string(dep))
 		child,e:=m.findSatisfying(r.Name,r.Op+r.Version,idx)
 		if e!=nil{fmt.Printf("%s  ? %s (%s)\n",prefix,dep,e);continue}
-		_ = m.printDependencyTree(child.Name,idx,prefix+"  ",seen)
+		if err := m.printDependencyTree(child.Name, idx, prefix+"  ", seen); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -350,6 +352,9 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 		valid:=false;if _,err:=os.Stat(archive);err==nil&&p.SHA256!=""{valid=repo.VerifySHA256(archive,p.SHA256)==nil}
 		if p.Kind!="meta"&&!valid{if err:=repo.DownloadPackage(p.URL,archive,p.Size);err!=nil{errCh<-fmt.Errorf("download %s: %w",p.Name,err);return};if err:=repo.VerifySHA256(archive,p.SHA256);err!=nil{_ = os.Remove(archive);errCh<-fmt.Errorf("verify %s: %w",p.Name,err);return}}
 		stage,err:=os.MkdirTemp(m.Paths.Staging,p.Name+"-*");if err!=nil{errCh<-err;return};sp.Stage=stage;sp.Archive=archive
+		// Publish the stage path immediately. If later extraction steps fail,
+		// cleanupStaged can still remove this goroutine's temporary directory.
+		results[i] = sp
 		if p.Kind!="meta"{
 			if p.Format==repo.HardcorePackageFormat {
 				data,e:=repo.InspectHardcoreArchive(archive);if e!=nil{errCh<-e;return}
@@ -376,7 +381,8 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 				entryRel:=""
 				if p.Entry!=""&&! (p.Kind=="appimage"||p.Format=="appimage"){
 					entry,err:=repo.FindEntry(rawStage,p.Entry);if err!=nil{errCh<-fmt.Errorf("locate executable for %s: %w",p.Name,err);return}
-					entryRel,_=filepath.Rel(rawStage,entry)
+					entryRel, err = filepath.Rel(rawStage, entry)
+					if err != nil { errCh <- fmt.Errorf("resolve executable path for %s: %w", p.Name, err); return }
 				}else if p.Kind=="appimage"||p.Format=="appimage"{entryRel=filepath.Base(p.Entry);if entryRel==""||entryRel=="."{entryRel=p.Name+".AppImage"}}
 				rootTree:=filepath.Join(rawStage,"root")
 				if err:=os.MkdirAll(filepath.Join(rootTree,"opt","yspm","packages",p.Name,p.Version),0o755);err!=nil{errCh<-err;return}
@@ -457,7 +463,7 @@ func (m *Manager) commitPackage(sp stagedPackage,db model.Database,rb *transacti
 		src:=filepath.Join(sp.Stage,rel);target:=filepath.Join(m.Paths.Root,rel)
 		if !repo.WithinRoot(m.Paths.Root,target){return fmt.Errorf("package path escapes root: %s",e.Path)}
 		if err:=os.MkdirAll(filepath.Dir(target),0o755);err!=nil{return err}
-		if existing,err:=os.Lstat(target);err==nil{
+		if _,err:=os.Lstat(target);err==nil{
 			if _,ok:=ownerForPath(db,e.Path);!ok&&!isConfig(sp.Pkg,e.Path){
 				return fmt.Errorf("refusing to overwrite unowned file %s",e.Path)
 			}
@@ -478,12 +484,15 @@ func (m *Manager) commitPackage(sp stagedPackage,db model.Database,rb *transacti
 					dist:=target+".yspm-dist";if err:=os.RemoveAll(dist);err!=nil{return err};if err:=copyNode(src,dist);err!=nil{return err};continue
 				}
 			}else{
-				_ = existing
 				backup:=filepath.Join(sp.Stage,".backup",rel);if err:=os.MkdirAll(filepath.Dir(backup),0o755);err!=nil{return err};if err:=os.Rename(target,backup);err!=nil{return err};rb.entries=append(rb.entries,rollbackEntry{target:target,backup:backup})
 			}
 		}else if !os.IsNotExist(err){return err}
 		if err:=os.Rename(src,target);err!=nil{
-			if err:=copyNode(src,target);err!=nil{return err};_ = os.RemoveAll(src)
+			if err:=copyNode(src,target);err!=nil{return err}
+			if err := os.RemoveAll(src); err != nil {
+				removeErr := os.RemoveAll(target)
+				return errors.Join(fmt.Errorf("remove staged source %s after cross-device copy: %w", src, err), removeErr)
+			}
 		}
 		rb.entries=append(rb.entries,rollbackEntry{target:target})
 	}
@@ -532,7 +541,8 @@ func copyNode(src, dst string) error {
 	}
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
 	if err != nil {
-		_ = in.Close()
+		closeErr := in.Close()
+		if closeErr != nil { return errors.Join(err, closeErr) }
 		return err
 	}
 	_, copyErr := io.Copy(out, in)
@@ -624,8 +634,8 @@ func (m *Manager) runInstalledHook(p model.InstalledPackage,name string) error {
 	if err != nil { return err }
 	path := f.Name()
 	defer os.Remove(path)
-	if _, err := f.WriteString(script); err != nil { _ = f.Close(); return err }
-	if err := f.Chmod(0o700); err != nil { _ = f.Close(); return err }
+	if _, err := f.WriteString(script); err != nil { return errors.Join(err, f.Close()) }
+	if err := f.Chmod(0o700); err != nil { return errors.Join(err, f.Close()) }
 	if err := f.Close(); err != nil { return err }
 	cmd := exec.Command("/bin/sh", path)
 	cmd.Env = append(os.Environ(), "YSPM_ROOT="+m.Paths.Root, "YSPM_PACKAGE="+p.Name, "YSPM_VERSION="+p.Version)
@@ -841,7 +851,7 @@ func (m *Manager) Worker(action, id string, args []string, yes, autoSnapshot boo
 		local := false
 		for _, a := range args {
 			lower := strings.ToLower(a)
-			if strings.HasSuffix(lower, ".yspkg") || strings.HasSuffix(lower, ".tar") || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.xz") || strings.HasSuffix(lower, ".tar.zst") {
+			if strings.HasSuffix(lower, ".yspkg") || strings.HasSuffix(lower, ".zip") || strings.HasSuffix(lower, ".tar") || strings.HasSuffix(lower, ".tar.gz") || strings.HasSuffix(lower, ".tgz") || strings.HasSuffix(lower, ".tar.xz") || strings.HasSuffix(lower, ".tar.zst") || strings.HasSuffix(lower, ".tar.bz2") {
 				local = true
 				break
 			}
@@ -885,7 +895,12 @@ func cleanupStaged(xs []stagedPackage){for _,x:=range xs{if x.Stage!=""{_ = os.R
 func dependsOn(ds []model.Dependency,name string)bool{for _,d:=range ds{if parseDependency(string(d)).Name==name{return true}};return false}
 func containsName(xs []string,want string)bool{for _,x:=range xs{if x==want{return true}};return false}
 func containsString(xs []string,want string)bool{return containsName(xs,want)}
-func confirm(prompt string)bool{if prompt!=""{fmt.Print(prompt)};var s string;_,_=fmt.Scanln(&s);return strings.EqualFold(strings.TrimSpace(s),"y")}
+func confirm(prompt string) bool {
+	if prompt != "" { fmt.Print(prompt) }
+	var answer string
+	if _, err := fmt.Scanln(&answer); err != nil { return false }
+	return strings.EqualFold(strings.TrimSpace(answer), "y")
+}
 func printInstallPlan(plan resolvedPlan,db model.Database){fmt.Printf("Transaction plan (%d package(s)):\n",len(plan.Packages));for _,p:=range plan.Packages{if old,ok:=db.Packages[p.Name];ok{fmt.Printf("  upgrade %-20s %s -> %s\n",p.Name,old.Version,p.Version)}else{fmt.Printf("  install %-20s %s\n",p.Name,p.Version)}}}
 func valueOr(a,b string)string{if a==""{return b};return a}
 func firstNonEmpty(a,b string)string{if a!=""{return a};return b}
