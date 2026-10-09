@@ -13,38 +13,6 @@ import (
 
 const CurrentSchema = 3
 
-func LoadDB() (model.Database, error) {
-	data, err := os.ReadFile(func() string {
-		p, _ := config.NewPaths(false)
-		return p.Database
-	}())
-	if os.IsNotExist(err) {
-		return model.Database{SchemaVersion: CurrentSchema, ABI: config.DefaultSystemABI, Packages: map[string]model.InstalledPackage{}}, nil
-	}
-	if err != nil { return model.Database{}, err }
-	var db model.Database
-	if err := json.Unmarshal(data, &db); err != nil {
-		return model.Database{}, fmt.Errorf("invalid database: %w", err)
-	}
-	if db.SchemaVersion == 0 { db.SchemaVersion = 1 }
-	if db.Packages == nil { db.Packages = map[string]model.InstalledPackage{} }
-	for name, p := range db.Packages {
-		if p.Name == "" { p.Name = name }
-		if p.FileHashes == nil { p.FileHashes = map[string]string{} }
-		if p.ConfigHashes == nil { p.ConfigHashes = map[string]string{} }
-		if p.Manifest == nil && len(p.Files) > 0 {
-			for _, f := range p.Files { p.Manifest = append(p.Manifest, model.FileEntry{Path:f, Type:"file"}) }
-		}
-		db.Packages[name] = p
-	}
-	if db.ABI == "" { db.ABI = config.DefaultSystemABI }
-	return db, nil
-}
-
-func pathForUser() (string,error) {
-	p,err:=config.NewPaths(true); if err!=nil { return "",err }; return p.Database,nil
-}
-
 func LoadDBFor(user bool) (model.Database,error) {
 	p,err:=config.NewPaths(user); if err!=nil{return model.Database{},err}
 	data,err:=os.ReadFile(p.Database)
@@ -78,8 +46,6 @@ func SaveDBFor(user bool, db model.Database) error {
 	return os.Rename(tmpPath,p.Database)
 }
 
-func SaveDB(db model.Database) error { return SaveDBFor(false,db) }
-
 func AddTransactionFor(user bool, tx model.Transaction) error {
 	db,err:=LoadDBFor(user);if err!=nil{return err}
 	db.Transactions=append(db.Transactions,tx)
@@ -96,10 +62,6 @@ func GetTransactionFor(user bool,id string)(model.Transaction,error){
 	for _,tx:=range db.Transactions{if tx.ID==id{return tx,nil}}
 	return model.Transaction{},fmt.Errorf("transaction %s not found",id)
 }
-
-func AddTransaction(tx model.Transaction) error { return AddTransactionFor(false,tx) }
-func UpdateTransaction(tx model.Transaction) error { return UpdateTransactionFor(false,tx) }
-func GetTransaction(id string)(model.Transaction,error){return GetTransactionFor(false,id)}
 
 func SaveSnapshotFor(user bool, s model.Snapshot) error {
 	db,err:=LoadDBFor(user);if err!=nil{return err}
