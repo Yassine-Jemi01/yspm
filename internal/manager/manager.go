@@ -224,7 +224,11 @@ func (m *Manager) runTransaction(action string,requested []string,yes,upgrade,au
 		tx, err := m.startTransaction(action,namesFromPackages(plan.Packages),snapshotID); if err != nil { return err }
 		staged,err:=m.prepare(plan.Packages)
 		if err!=nil{return m.finishFailed(tx,err)}
-		defer cleanupStaged(staged)
+		defer func() {
+			if cleanupErr := cleanupStaged(staged); cleanupErr != nil {
+				fmt.Fprintf(os.Stderr, "yspm: staging cleanup failed: %v\n", cleanupErr)
+			}
+		}()
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		rollback:=&transactionRollback{}
 		for _,sp:=range staged{
@@ -449,7 +453,7 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 		sp.Manifest,err=repo.Manifest(sp.Stage);if err!=nil{errCh<-err;return}
 		results[i]=sp
 	}()}
-	wg.Wait();close(errCh);for e:=range errCh{cleanupStaged(results);return nil,e};return results,nil
+	wg.Wait();close(errCh);for e:=range errCh{cleanupErr := cleanupStaged(results); return nil, errors.Join(e, cleanupErr)};return results,nil
 }
 
 func (m *Manager) validateConflicts(staged []stagedPackage,db model.Database)error{
@@ -790,7 +794,11 @@ func (m *Manager) UpgradeRelease(release string, yes, autoSnapshot bool) error {
 		if err != nil {
 			return m.finishFailed(tx, err)
 		}
-		defer cleanupStaged(staged)
+		defer func() {
+			if cleanupErr := cleanupStaged(staged); cleanupErr != nil {
+				fmt.Fprintf(os.Stderr, "yspm: staging cleanup failed: %v\n", cleanupErr)
+			}
+		}()
 		if err := m.validateConflicts(staged, db); err != nil {
 			return m.finishFailed(tx, err)
 		}
