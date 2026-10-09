@@ -141,21 +141,3 @@ func CacheDirFor(user bool) (string, error) {
 func CacheDir() (string, error) {
 	return CacheDirFor(os.Geteuid() != 0)
 }
-func DataDir() (string,error) {
-	user := os.Geteuid() != 0
-	p, err := NewPaths(user)
-	if err != nil { return "", err }
-	return p.State, nil
-}
-func BinDir() (string,error) {
-	user := os.Geteuid() != 0
-	p, err := NewPaths(user)
-	if err != nil { return "", err }
-	return p.Bin, nil
-}
-func ApplicationsDir() (string,error) {
-	user := os.Geteuid() != 0
-	p, err := NewPaths(user)
-	if err != nil { return "", err }
-	return p.Applications, nil
-}
