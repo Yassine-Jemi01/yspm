@@ -17,11 +17,11 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Yassine-Jemi01/yspm/internal/model"
+	"github.com/Yassine-Jemi01/yspm/internal/pathutil"
 )
 
 const PackageFormat = "yspkg"
@@ -573,12 +573,6 @@ func scanELFRequirements(root string) ([]string, []string) {
 	return req, prov
 }
 
-func withinRoot(root, target string) bool {
-	rel, err := filepath.Rel(root, target)
-	if err != nil { return false }
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)))
-}
-
 func PackageSHA256(path string) (string, error) { return fileSHA256(path) }
 
 func BuildRepository(dir, output, baseURL, release, abi string) (model.Index, error) {
@@ -637,27 +631,6 @@ func GenerateKeypair(publicPath, privatePath string) error {
 	if err != nil { return err }
 	if err := os.WriteFile(publicPath, []byte(hex.EncodeToString(pub)+"\n"), 0o644); err != nil { return err }
 	return os.WriteFile(privatePath, []byte(hex.EncodeToString(priv)+"\n"), 0o600)
-}
-
-func MakePackageURL(dir, name string) string {
-	return "file://" + filepath.ToSlash(filepath.Join(dir, name))
-}
-
-func EncodeArchitecture(a string) string {
-	if a == "" { return "" }
-	return strings.ToLower(strings.TrimSpace(a))
-}
-
-func ParseSize(s string) int64 {
-	s = strings.TrimSpace(strings.ToLower(s))
-	mult := int64(1)
-	switch {
-	case strings.HasSuffix(s,"kib"): mult=1024; s=strings.TrimSuffix(s,"kib")
-	case strings.HasSuffix(s,"mib"): mult=1024*1024; s=strings.TrimSuffix(s,"mib")
-	case strings.HasSuffix(s,"gib"): mult=1024*1024*1024; s=strings.TrimSuffix(s,"gib")
-	}
-	v, _ := strconv.ParseFloat(strings.TrimSpace(s),64)
-	return int64(v*float64(mult))
 }
 
 func Manifest(root string) ([]model.FileEntry, error) { return filesystemManifest(root) }
