@@ -16,14 +16,6 @@ import (
 
 const CurrentSchema = 3
 
-func LoadDB() (model.Database, error) {
-	p, err := config.NewPaths(false)
-	if err != nil {
-		return model.Database{}, err
-	}
-	return loadDBPath(p.Database)
-}
-
 func LoadDBFor(user bool) (model.Database, error) {
 	p, err := config.NewPaths(user)
 	if err != nil {
@@ -277,10 +269,6 @@ func GetTransactionFor(user bool, id string) (model.Transaction, error) {
 	}
 	return model.Transaction{}, fmt.Errorf("transaction %s not found", id)
 }
-
-func AddTransaction(tx model.Transaction) error { return AddTransactionFor(false, tx) }
-func UpdateTransaction(tx model.Transaction) error { return UpdateTransactionFor(false, tx) }
-func GetTransaction(id string) (model.Transaction, error) { return GetTransactionFor(false, id) }
 
 func SaveSnapshotFor(user bool, snapshot model.Snapshot) error {
 	p, err := config.NewPaths(user)
