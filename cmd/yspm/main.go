@@ -218,7 +218,7 @@ func repoCommand(m *manager.Manager,args []string)error{
 
 func snapshotCommand(m *manager.Manager,args []string)error{
 	if len(args)==0{return fmt.Errorf("usage: yspm snapshot create|list|restore <id>")}
-	switch args[0]{case "create":_,err:=manager.CreateSnapshot(m);return err
+	switch args[0]{case "create":_,err:=manager.CreateSnapshotWithLock(m);return err
 	case "list":return manager.ListSnapshots(m)
 	case "restore":if len(args)!=2{return fmt.Errorf("snapshot restore requires an ID")};return manager.RestoreSnapshot(m,args[1])
 	default:return fmt.Errorf("unknown snapshot command %q",args[0])}
