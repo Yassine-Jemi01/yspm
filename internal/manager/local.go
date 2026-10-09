@@ -68,7 +68,7 @@ func (m *Manager) InstallLocal(paths []string, yes, autoSnapshot bool) error {
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		rb:=&transactionRollback{}
 		for _,sp:=range staged{
-			if err:=m.rollbackAndFail(tx,rb,err)
+			if err:=m.runScript(sp,"preinstall");err!=nil{return m.rollbackAndFail(tx,rb,err)}
 			if err:=m.commitPackage(sp,db,rb);err!=nil{return m.rollbackAndFail(tx,rb,err)}
 			hook:="postinstall";if sp.HardcoreLegacy{hook="install"}
 			if err:=m.runScript(sp,hook);err!=nil{return m.rollbackAndFail(tx,rb,err)}
