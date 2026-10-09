@@ -30,7 +30,7 @@ type PackageData struct {
 }
 
 func accountPackageTarHeader(header *tar.Header, count *int, total *int64) error {
-	*count++
+	*count = *count + 1
 	if *count > maxTarEntries {
 		return fmt.Errorf("package archive exceeds the %d-entry limit", maxTarEntries)
 	}
@@ -286,7 +286,8 @@ func BuildPackage(root, output string, p model.Package, scriptsDir string) error
 	p.Files, err = filesystemManifest(root)
 	if err != nil { return err }
 	if len(p.SharedRequires) == 0 || len(p.SharedProvides) == 0 {
-		req, prov := scanELFRequirements(root)
+		req, prov, scanErr := scanELFRequirements(root)
+		if scanErr != nil { return scanErr }
 		if len(p.SharedRequires) == 0 { p.SharedRequires = req }
 		if len(p.SharedProvides) == 0 { p.SharedProvides = prov }
 	}
@@ -403,10 +404,15 @@ func fileSHA256(path string) (string, error) {
 
 func scanELFRequirements(root string) ([]string, []string) {
 	reqSet, provSet := map[string]bool{}, map[string]bool{}
-	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info == nil || !info.Mode().IsRegular() { return nil }
-		readelf, err := exec.LookPath("readelf")
-		if err != nil { return nil }
+	readelf, err := exec.LookPath("readelf")
+	if err != nil {
+		// ELF dependency discovery is optional; package building remains usable
+		// on minimal systems where binutils is not installed.
+		return nil, nil, nil
+	}
+	walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil { return err }
+		if info == nil || !info.Mode().IsRegular() { return nil }
 		out, err := exec.Command(readelf, "-d", path).Output()
 		if err != nil { return nil }
 		for _, line := range strings.Split(string(out), "\n") {
@@ -425,11 +431,14 @@ func scanELFRequirements(root string) ([]string, []string) {
 		}
 		return nil
 	})
+	if walkErr != nil {
+		return nil, nil, fmt.Errorf("scan package tree for ELF dependencies: %w", walkErr)
+	}
 	req, prov := make([]string,0,len(reqSet)), make([]string,0,len(provSet))
 	for v := range reqSet { req = append(req, v) }
 	for v := range provSet { prov = append(prov, v) }
 	sort.Strings(req); sort.Strings(prov)
-	return req, prov
+	return req, prov, nil
 }
 
 func WithinRoot(root, target string) bool {
