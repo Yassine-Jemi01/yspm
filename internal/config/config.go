@@ -126,7 +126,6 @@ func NormalizeArch(a string) string {
 	}
 }
 
-func HostOS() string { return runtime.GOOS }
 func HostArch() string { return NormalizeArch(runtime.GOARCH) }
 
 func CacheDirFor(user bool) (string, error) {
@@ -141,22 +140,4 @@ func CacheDirFor(user bool) (string, error) {
 // should use CacheDirFor with their explicit --user decision.
 func CacheDir() (string, error) {
 	return CacheDirFor(os.Geteuid() != 0)
-}
-func DataDir() (string,error) {
-	user := os.Geteuid() != 0
-	p, err := NewPaths(user)
-	if err != nil { return "", err }
-	return p.State, nil
-}
-func BinDir() (string,error) {
-	user := os.Geteuid() != 0
-	p, err := NewPaths(user)
-	if err != nil { return "", err }
-	return p.Bin, nil
-}
-func ApplicationsDir() (string,error) {
-	user := os.Geteuid() != 0
-	p, err := NewPaths(user)
-	if err != nil { return "", err }
-	return p.Applications, nil
 }
