@@ -47,23 +47,66 @@ func indexCachePath() (string, error) {
 	return indexCachePathFor(os.Geteuid() != 0)
 }
 
+const (
+	maxRepositoryMetadataBytes int64 = 64 << 20
+	maxDetachedSignatureBytes  int64 = 4 << 10
+	maxDownloadBytes           int64 = 4 << 30
+	maxZipEntries                    = 100_000
+	maxZipEntryBytes           uint64 = 4 << 30
+	maxZipExpandedBytes        uint64 = 8 << 30
+)
+
 func readSource(source string) ([]byte, error) {
+	return readSourceLimit(source, maxRepositoryMetadataBytes)
+}
+
+func readSourceLimit(source string, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		return nil, errors.New("invalid source size limit")
+	}
 	if u, err := url.Parse(source); err == nil && u.Scheme != "" && u.Scheme != "file" {
-		r := &http.Client{Timeout: 45 * time.Second}
-		resp, err := r.Get(source)
+		client := &http.Client{Timeout: 45 * time.Second}
+		resp, err := client.Get(source)
 		if err != nil {
 			return nil, err
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("repository returned HTTP %s", resp.Status)
+			return nil, fmt.Errorf("source returned HTTP %s", resp.Status)
 		}
-		return io.ReadAll(resp.Body)
+		if resp.ContentLength > limit {
+			return nil, fmt.Errorf("source size %d exceeds %d-byte limit", resp.ContentLength, limit)
+		}
+		data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > limit {
+			return nil, fmt.Errorf("source exceeds %d-byte limit", limit)
+		}
+		return data, nil
 	}
 	if u, err := url.Parse(source); err == nil && u.Scheme == "file" {
 		source = u.Path
 	}
-	return os.ReadFile(source)
+	file, err := os.Open(source)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	if info, err := file.Stat(); err != nil {
+		return nil, err
+	} else if info.Size() > limit {
+		return nil, fmt.Errorf("source size %d exceeds %d-byte limit", info.Size(), limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("source exceeds %d-byte limit", limit)
+	}
+	return data, nil
 }
 
 func FetchIndex(source string) (model.Index, error) {
@@ -146,7 +189,7 @@ func fetchAndVerifyIndexSignature(data []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	sigRaw, err := readSource(sigURL)
+	sigRaw, err := readSourceLimit(sigURL, maxDetachedSignatureBytes)
 	if err != nil {
 		return nil, fmt.Errorf("fetch repository signature: %w", err)
 	}
@@ -347,20 +390,35 @@ func Download(source, destination string) error {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return fmt.Errorf("download failed: HTTP %s", resp.Status)
 		}
-		return writeAtomic(resp.Body, destination)
+		if resp.ContentLength > maxDownloadBytes {
+			return fmt.Errorf("download size %d exceeds %d-byte limit", resp.ContentLength, maxDownloadBytes)
+		}
+		return writeAtomicLimit(resp.Body, destination, maxDownloadBytes)
 	}
 	if u, err := url.Parse(source); err == nil && u.Scheme == "file" {
 		source = u.Path
 	}
-	f, err := os.Open(source)
+	file, err := os.Open(source)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return writeAtomic(f, destination)
+	defer file.Close()
+	if info, err := file.Stat(); err != nil {
+		return err
+	} else if info.Size() > maxDownloadBytes {
+		return fmt.Errorf("download size %d exceeds %d-byte limit", info.Size(), maxDownloadBytes)
+	}
+	return writeAtomicLimit(file, destination, maxDownloadBytes)
 }
 
 func writeAtomic(r io.Reader, destination string) error {
+	return writeAtomicLimit(r, destination, maxDownloadBytes)
+}
+
+func writeAtomicLimit(r io.Reader, destination string, limit int64) error {
+	if limit <= 0 {
+		return errors.New("invalid download size limit")
+	}
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
 	}
@@ -370,9 +428,14 @@ func writeAtomic(r io.Reader, destination string) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if _, err := io.Copy(tmp, r); err != nil {
+	n, err := io.Copy(tmp, io.LimitReader(r, limit+1))
+	if err != nil {
 		_ = tmp.Close()
 		return err
+	}
+	if n > limit {
+		_ = tmp.Close()
+		return fmt.Errorf("download exceeds %d-byte limit", limit)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
@@ -903,44 +966,115 @@ func extractZip(archivePath, destination string) error {
 		return err
 	}
 	defer r.Close()
+	if len(r.File) > maxZipEntries {
+		return fmt.Errorf("ZIP archive exceeds the %d-entry limit", maxZipEntries)
+	}
+
+	type zipEntry struct {
+		file *zip.File
+		name string
+	}
+	entries := make([]zipEntry, 0, len(r.File))
+	byName := make(map[string]bool, len(r.File))
+	var expanded uint64
 	for _, f := range r.File {
-		name := filepath.Clean(f.Name)
-		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
-			return fmt.Errorf("unsafe archive path %q", f.Name)
-		}
-		target := filepath.Join(destination, name)
-		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(destination)+string(os.PathSeparator)) && target != destination {
-			return fmt.Errorf("archive escapes destination: %q", f.Name)
-		}
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		in, err := f.Open()
+		name, err := normalizeTarPath(f.Name)
 		if err != nil {
 			return err
 		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		if name == "." && !f.FileInfo().IsDir() {
+			return fmt.Errorf("ZIP file entry cannot name extraction root")
+		}
+		if byName[name] {
+			return fmt.Errorf("duplicate ZIP archive path %q", name)
+		}
+		byName[name] = true
+		if f.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("ZIP symlink entries are not supported: %q", f.Name)
+		}
+		if f.FileInfo().IsDir() {
+			if f.UncompressedSize64 != 0 {
+				return fmt.Errorf("ZIP directory entry %q has unexpected data", f.Name)
+			}
+		} else {
+			if f.UncompressedSize64 > maxZipEntryBytes {
+				return fmt.Errorf("ZIP entry %q exceeds the per-file size limit", name)
+			}
+			if expanded > maxZipExpandedBytes-f.UncompressedSize64 {
+				return fmt.Errorf("ZIP archive exceeds the expanded-size limit")
+			}
+			expanded += f.UncompressedSize64
+		}
+		entries = append(entries, zipEntry{file: f, name: name})
+	}
+	for _, entry := range entries {
+		for parent := pathpkg.Dir(entry.name); parent != "." && parent != "/"; parent = pathpkg.Dir(parent) {
+			if _, exists := byName[parent]; exists {
+				// The type is checked below using the actual ZIP entries.
+				for _, candidate := range entries {
+					if candidate.name == parent && !candidate.file.FileInfo().IsDir() {
+						return fmt.Errorf("ZIP path %q is nested beneath non-directory entry %q", entry.name, parent)
+					}
+				}
+			}
+		}
+	}
+
+	root, err := prepareTarDestination(destination)
+	if err != nil {
+		return err
+	}
+	var dirs []zipEntry
+	for _, entry := range entries {
+		if entry.name == "." {
+			continue
+		}
+		if entry.file.FileInfo().IsDir() {
+			if _, err := ensureTarDirectories(root, entry.name); err != nil {
+				return err
+			}
+			dirs = append(dirs, entry)
+			continue
+		}
+		parent, err := ensureTarDirectories(root, pathpkg.Dir(entry.name))
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(parent, filepath.Base(filepath.FromSlash(entry.name)))
+		in, err := entry.file.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
 			_ = in.Close()
 			return err
 		}
-		_, copyErr := io.Copy(out, in)
+		n, copyErr := io.CopyN(out, in, int64(entry.file.UncompressedSize64))
 		closeOutErr := out.Close()
 		closeInErr := in.Close()
 		if copyErr != nil {
-			return copyErr
+			_ = os.Remove(target)
+			return fmt.Errorf("extract ZIP entry %q after %d bytes: %w", entry.name, n, copyErr)
 		}
 		if closeOutErr != nil {
+			_ = os.Remove(target)
 			return closeOutErr
 		}
 		if closeInErr != nil {
+			_ = os.Remove(target)
 			return closeInErr
+		}
+		if err := os.Chmod(target, entry.file.Mode().Perm()&0o777); err != nil {
+			return err
+		}
+	}
+	sort.Slice(dirs, func(i, j int) bool {
+		return strings.Count(dirs[i].name, "/") > strings.Count(dirs[j].name, "/")
+	})
+	for _, entry := range dirs {
+		if err := os.Chmod(filepath.Join(root, filepath.FromSlash(entry.name)), entry.file.Mode().Perm()&0o777); err != nil {
+			return err
 		}
 	}
 	return nil
