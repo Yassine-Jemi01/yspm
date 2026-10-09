@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"strconv"
 	"strings"
 	"unicode"
 )
@@ -18,14 +17,10 @@ func compareVersion(a, b string) int {
 		if i >= len(bs) {
 			return 1
 		}
-		ai, aNum := numberToken(as[i])
-		bi, bNum := numberToken(bs[i])
+		aNum, bNum := numericToken(as[i]), numericToken(bs[i])
 		if aNum && bNum {
-			if ai < bi {
-				return -1
-			}
-			if ai > bi {
-				return 1
+			if result := compareNumericTokens(as[i], bs[i]); result != 0 {
+				return result
 			}
 			continue
 		}
@@ -35,10 +30,11 @@ func compareVersion(a, b string) int {
 			}
 			return -1
 		}
-		if as[i] < bs[i] {
+		ai, bi := strings.ToLower(as[i]), strings.ToLower(bs[i])
+		if ai < bi {
 			return -1
 		}
-		if as[i] > bs[i] {
+		if ai > bi {
 			return 1
 		}
 	}
@@ -50,12 +46,12 @@ func tokenizeVersion(v string) []string {
 	var cur strings.Builder
 	flush := func() {
 		if cur.Len() > 0 {
-			out = append(out, strings.ToLower(cur.String()))
+			out = append(out, cur.String())
 			cur.Reset()
 		}
 	}
 	for _, r := range v {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		if unicode.IsLetter(r) || (r >= '0' && r <= '9') {
 			cur.WriteRune(r)
 			continue
 		}
@@ -65,15 +61,40 @@ func tokenizeVersion(v string) []string {
 	return out
 }
 
-func numberToken(s string) (int64, bool) {
-	for _, r := range s {
-		if !unicode.IsDigit(r) {
-			return 0, false
+func numericToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
 		}
 	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0, true
+	return true
+}
+
+// compareNumericTokens compares unbounded decimal version tokens without
+// overflowing a machine integer. Leading zeroes are ignored for ordering.
+func compareNumericTokens(a, b string) int {
+	a = strings.TrimLeft(a, "0")
+	b = strings.TrimLeft(b, "0")
+	if a == "" {
+		a = "0"
 	}
-	return n, true
+	if b == "" {
+		b = "0"
+	}
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
 }
