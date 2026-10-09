@@ -968,7 +968,7 @@ func extractZip(archivePath, destination string) error {
 		if name == "." && !f.FileInfo().IsDir() {
 			return fmt.Errorf("ZIP file entry cannot name extraction root")
 		}
-		if byName[name] {
+		if _, exists := byName[name]; exists {
 			return fmt.Errorf("duplicate ZIP archive path %q", name)
 		}
 		entry := zipEntry{file: f, name: name}
