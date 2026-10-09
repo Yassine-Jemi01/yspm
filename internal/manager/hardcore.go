@@ -175,29 +175,3 @@ func (m *Manager) Owner(path string) error {
 	}
 	return nil
 }
-
-func legacyDependenciesSatisfied(pkgs []model.Package, db model.Database) error {
-	available := map[string]bool{}
-	for name := range db.Packages {
-		available[name] = true
-	}
-	for _, p := range pkgs {
-		available[p.Name] = true
-	}
-	for _, p := range pkgs {
-		for _, dep := range p.Dependencies {
-			satisfied := false
-			for _, alt := range strings.Split(string(dep), "|") {
-				r := parseDependency(strings.TrimSpace(alt))
-				if available[r.Name] {
-					satisfied = true
-					break
-				}
-			}
-			if !satisfied {
-				return fmt.Errorf("package %s requires missing dependency %s", p.Name, dep)
-			}
-		}
-	}
-	return nil
-}
