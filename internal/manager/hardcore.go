@@ -23,7 +23,7 @@ func (m *Manager) hydrateHardcorePackage(p model.Package) (model.Package, error)
 		valid = repo.VerifySHA256(archive, p.SHA256) == nil
 	}
 	if !valid {
-		if err := repo.Download(p.URL, archive); err != nil {
+		if err := repo.DownloadPackage(p.URL, archive, p.Size); err != nil {
 			return p, fmt.Errorf("download %s: %w", p.Name, err)
 		}
 		if err := repo.VerifySHA256(archive, p.SHA256); err != nil {
