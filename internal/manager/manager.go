@@ -792,6 +792,16 @@ func (m *Manager) finishCommitted(tx model.Transaction, rb *transactionRollback)
 	return errors.Join(successErr, cleanupErr)
 }
 
+func backgroundWorkerArgs(action, id string, args []string, autoSnapshot bool) []string {
+	out := []string{"__worker", action, id, "--"}
+	out = append(out, args...)
+	out = append(out, "--yes")
+	if autoSnapshot {
+		out = append(out, "--snapshot")
+	}
+	return out
+}
+
 func (m *Manager) RunBackground(action string, args []string, yes, autoSnapshot bool) error {
 	if !m.User {
 		if err := m.requirePrivileges("background " + action); err != nil { return err }
@@ -808,11 +818,7 @@ func (m *Manager) RunBackground(action string, args []string, yes, autoSnapshot 
 		}
 		logFile, err := os.OpenFile(filepath.Join(m.Paths.Transactions, tx.ID+".log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 		if err != nil { return m.finishFailed(tx, fmt.Errorf("open background transaction log: %w", err)) }
-		workerArgs := []string{"__worker", action, tx.ID, "--"}
-		workerArgs = append(workerArgs, args...)
-		workerArgs = append(workerArgs, "--yes")
-		if autoSnapshot { workerArgs = append(workerArgs, "--snapshot") }
-		cmd := exec.Command(os.Args[0], workerArgs...)
+		cmd := exec.Command(os.Args[0], backgroundWorkerArgs(action, tx.ID, args, autoSnapshot))
 		cmd.Stdout, cmd.Stderr = logFile, logFile
 		cmd.Env = append(os.Environ(), "YSPM_USER="+boolText(m.User), "YSPM_ARCH="+m.arch)
 		startErr := cmd.Start()
