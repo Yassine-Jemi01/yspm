@@ -455,7 +455,7 @@ func (m *Manager) commitPackage(sp stagedPackage,db model.Database,rb *transacti
 		if e.Type=="dir"{continue}
 		rel:=filepath.Clean(filepath.FromSlash(e.Path));if filepath.IsAbs(rel)||rel==".."||strings.HasPrefix(rel,".."+string(os.PathSeparator)){return fmt.Errorf("unsafe package path %q",e.Path)}
 		src:=filepath.Join(sp.Stage,rel);target:=filepath.Join(m.Paths.Root,rel)
-		if !within(m.Paths.Root,target){return fmt.Errorf("package path escapes root: %s",e.Path)}
+		if !repo.WithinRoot(m.Paths.Root,target){return fmt.Errorf("package path escapes root: %s",e.Path)}
 		if err:=os.MkdirAll(filepath.Dir(target),0o755);err!=nil{return err}
 		if existing,err:=os.Lstat(target);err==nil{
 			if _,ok:=ownerForPath(db,e.Path);!ok&&!isConfig(sp.Pkg,e.Path){
@@ -864,8 +864,6 @@ func (m *Manager) Worker(action, id string, args []string, yes, autoSnapshot boo
 	return operationErr
 }
 
-func (m *Manager) runInstalledHookFromArchive(_ model.InstalledPackage,_ string)error{return nil}
-
 func packageFilename(p model.Package)string{
 	if p.Format=="yspkg"{return p.Name+"-"+p.Version+"-"+p.Architecture+".yspkg"}
 	if p.Format==repo.HardcorePackageFormat{
@@ -878,7 +876,6 @@ func packageFilename(p model.Package)string{
 }
 func namesFromPackages(ps []model.Package)[]string{out:=make([]string,len(ps));for i,p:=range ps{out[i]=p.Name};return out}
 func cleanupStaged(xs []stagedPackage){for _,x:=range xs{if x.Stage!=""{_ = os.RemoveAll(x.Stage)}}}
-func within(root,target string)bool{rel,err:=filepath.Rel(root,target);if err!=nil{return false};return rel=="."||(!strings.HasPrefix(rel,".."+string(os.PathSeparator))&&rel!="..")}
 func dependsOn(ds []model.Dependency,name string)bool{for _,d:=range ds{if parseDependency(string(d)).Name==name{return true}};return false}
 func containsName(xs []string,want string)bool{for _,x:=range xs{if x==want{return true}};return false}
 func containsString(xs []string,want string)bool{return containsName(xs,want)}
