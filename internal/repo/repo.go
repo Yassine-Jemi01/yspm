@@ -494,9 +494,6 @@ func (r *commandTarReadCloser) Close() error {
 func ExtractArchive(archivePath, format, destination string) error {
 	switch strings.ToLower(strings.TrimSpace(format)) {
 	case "zip":
-		if err := os.MkdirAll(destination, 0o755); err != nil {
-			return err
-		}
 		return extractZip(archivePath, destination)
 	case "tar.gz", "tgz", "tar.xz", "tar.bz2", "tar.zst", "tar":
 		return extractTar(archivePath, format, destination)
