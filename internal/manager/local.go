@@ -77,7 +77,7 @@ func (m *Manager) InstallLocal(paths []string, yes, autoSnapshot bool) error {
 			if err:=m.runScript(sp,hook);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
 			if err:=ApplyServices(m,sp.Pkg);err!=nil{return m.finishFailedWithRollback(tx, rb, err)};if err:=ApplyTriggers(m,sp.Pkg);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
 			ip:=m.installedFromStage(sp);ip.Explicit=containsName(requested,sp.Pkg.Name);db.Packages[sp.Pkg.Name]=ip
-			for _,old:=range sp.Pkg.Replaces{if _,ok:=db.Packages[old];ok{delete(db.Packages,old)}}
+			for _, old := range sp.Pkg.Replaces { delete(db.Packages, old) }
 		}
 		if err:=store.SaveDBFor(m.User,db);err!=nil{return m.finishFailedWithRollback(tx, rb, err)}
 		return m.finishCommitted(tx, rb.finalize())
