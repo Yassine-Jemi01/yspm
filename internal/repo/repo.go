@@ -778,7 +778,7 @@ func validateTarArchive(file *os.File) ([]tarArchiveEntry, error) {
 		}
 		if entry.typeflag == tar.TypeLink {
 			target, ok := byName[entry.linkname]
-			if !ok || (target.typeflag != tar.TypeReg && target.typeflag != tar.TypeReg) {
+			if !ok || (target.typeflag != tar.TypeReg) {
 				return nil, fmt.Errorf("hardlink %q must target a regular file in the same archive", entry.name)
 			}
 		}
