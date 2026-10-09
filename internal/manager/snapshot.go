@@ -27,7 +27,13 @@ func CreateSnapshot(m *Manager) (string,error) {
 	cmd:=exec.Command(btrfs,"subvolume","snapshot","-r",source,dst)
 	if out,err:=cmd.CombinedOutput();err!=nil{return "",fmt.Errorf("create btrfs snapshot: %w: %s",err,strings.TrimSpace(string(out)))}
 	s:=model.Snapshot{ID:id,Path:dst,CreatedAt:time.Now(),ReadOnly:true}
-	if err:=store.SaveSnapshotFor(m.User,s);err!=nil{return "",err}
+	if err:=store.SaveSnapshotFor(m.User,s);err!=nil{
+		output, cleanupErr := exec.Command(btrfs, "subvolume", "delete", dst).CombinedOutput()
+		if cleanupErr != nil {
+			return "", errors.Join(err, fmt.Errorf("remove snapshot %s after metadata save failed: %w: %s", dst, cleanupErr, strings.TrimSpace(string(output))))
+		}
+		return "", err
+	}
 	fmt.Printf("Snapshot created: %s\n",id)
 	return id,nil
 }
