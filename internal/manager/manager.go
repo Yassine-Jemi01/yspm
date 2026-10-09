@@ -36,6 +36,7 @@ type stagedPackage struct {
 	Pkg        model.Package
 	Archive    string
 	Stage      string
+	CleanupStage string
 	Manifest   []model.FileEntry
 	Scripts    map[string]string
 	Legacy         bool
@@ -259,7 +260,7 @@ func (m *Manager) resolve(idx model.Index,db model.Database,requested []string,u
 		p,e:=m.chooseWithConstraints(r, constraints[key], idx);if e!=nil{return resolvedPlan{},fmt.Errorf("resolve %q: %w",expr,e)}
 		chosen[p.Name+":"+p.Architecture]=p
 		for _,d:=range p.Dependencies{queue=append(queue,string(d))}
-		for _,d:=range p.SharedRequires{queue=append(queue,d)}
+		queue = append(queue, p.SharedRequires...)
 	}
 	var pkgs []model.Package
 	for _,p:=range chosen{
@@ -332,21 +333,25 @@ func parseDependency(s string) dependencyRequest {
 	if op != "" {
 		opIndex = strings.Index(s, op)
 	}
-	if colon := strings.LastIndex(s, ":"); colon > 0 && (opIndex < 0 || colon < opIndex) {
+	if colon := strings.LastIndex(s, ":"); colon > 0 {
 		candidateEnd := len(s)
-		if opIndex > colon {
+		if opIndex >= 0 && colon < opIndex {
 			candidateEnd = opIndex
 		}
 		candidate := strings.TrimSpace(s[colon+1 : candidateEnd])
 		if isArchitectureSuffix(candidate) {
 			arch = config.NormalizeArch(candidate)
-			s = strings.TrimSpace(s[:colon] + s[candidateEnd:])
+			if opIndex >= 0 && colon < opIndex {
+				s = strings.TrimSpace(s[:colon] + s[candidateEnd:])
+			} else {
+				s = strings.TrimSpace(s[:colon])
+			}
 		}
 	}
 	op, ver := parseConstraint(s)
 	name := s
 	if op != "" {
-		opIndex := strings.Index(s, op)
+		opIndex = strings.Index(s, op)
 		name = strings.TrimSpace(s[:opIndex])
 		ver = strings.TrimSpace(s[opIndex+len(op):])
 	}
@@ -397,7 +402,7 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 				return
 			}
 		}
-		stage,err:=os.MkdirTemp(m.Paths.Staging,p.Name+"-*");if err!=nil{errCh<-err;return};sp.Stage=stage;sp.Archive=archive
+		stage,err:=os.MkdirTemp(m.Paths.Staging,p.Name+"-*");if err!=nil{errCh<-err;return};sp.Stage=stage;sp.CleanupStage=stage;sp.Archive=archive
 		// Register staging immediately so every later error path can clean it.
 		results[i] = sp
 		if p.Kind!="meta"{
@@ -447,7 +452,7 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 					desktop:=fmt.Sprintf("[Desktop Entry]\\nType=Application\\nName=%s\\nComment=%s\\nExec=%s %%U\\nTerminal=false\\nCategories=%s\\n",escapeDesktopText(dname),escapeDesktopText(p.Description),command,cats)
 					if err:=os.WriteFile(filepath.Join(desktopDir,p.Name+".desktop"),[]byte(desktop),0o644);err!=nil{errCh<-err;return}
 				}
-				stage=rootTree
+				sp.Stage = rootTree
 				sp.Legacy=true;sp.Command=command;sp.InstallDir=filepath.Join(m.Paths.Root,"opt","yspm","packages",p.Name,p.Version)
 			}
 		}
@@ -470,7 +475,6 @@ func (m *Manager) validateConflicts(staged []stagedPackage,db model.Database)err
 
 type rollbackEntry struct {
 	target, backup string
-	created        bool
 }
 
 type transactionRollback struct {
@@ -693,13 +697,6 @@ func (m *Manager) runInstalledHook(p model.InstalledPackage,name string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil { return fmt.Errorf("%s hook for %s failed: %w: %s", name, p.Name, err, strings.TrimSpace(string(out))) }
 	return nil
-}
-func (m *Manager) runInstalledHookByName(name,hook string) error {
-	db, err := store.LoadDBFor(m.User)
-	if err != nil { return err }
-	p, ok := db.Packages[name]
-	if !ok { return nil }
-	return m.runInstalledHook(p, hook)
 }
 func copyHooks(in map[string]string) map[string]string {
 	if len(in)==0 { return nil }
@@ -1001,9 +998,15 @@ func namesFromPackages(ps []model.Package)[]string{out:=make([]string,len(ps));f
 func cleanupStaged(xs []stagedPackage) error {
 	var cleanupErr error
 	for _, x := range xs {
-		if x.Stage == "" { continue }
-		if err := os.RemoveAll(x.Stage); err != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove staging directory %s: %w", x.Stage, err))
+		path := x.CleanupStage
+		if path == "" {
+			path = x.Stage
+		}
+		if path == "" {
+			continue
+		}
+		if err := os.RemoveAll(path); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove staging directory %s: %w", path, err))
 		}
 	}
 	return cleanupErr
