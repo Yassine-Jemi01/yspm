@@ -486,7 +486,11 @@ func (m *Manager) commitPackage(sp stagedPackage,db model.Database,rb *transacti
 			}
 
 			if isConfig(sp.Pkg,e.Path){
-				if old,ok:=findPreviousConfigHash(db,e.Path);ok&&hashPath(target)==old{
+				currentHash, hashErr := hashPath(target)
+				if hashErr != nil {
+					return fmt.Errorf("hash existing config %s: %w", e.Path, hashErr)
+				}
+				if old,ok:=findPreviousConfigHash(db,e.Path);ok&&currentHash==old{
 					backup:=filepath.Join(sp.Stage,".backup",rel);if err:=os.MkdirAll(filepath.Dir(backup),0o755);err!=nil{return err};if err:=os.Rename(target,backup);err!=nil{return err};rb.entries=append(rb.entries,rollbackEntry{target:target,backup:backup})
 				}else{
 					dist:=target+".yspm-dist";if err:=os.RemoveAll(dist);err!=nil{return err};if err:=copyNode(src,dist);err!=nil{return err};continue
@@ -497,20 +501,70 @@ func (m *Manager) commitPackage(sp stagedPackage,db model.Database,rb *transacti
 			}
 		}else if !os.IsNotExist(err){return err}
 		if err:=os.Rename(src,target);err!=nil{
-			if err:=copyNode(src,target);err!=nil{return err};_ = os.RemoveAll(src)
+			if copyErr:=copyNode(src,target);copyErr!=nil{return copyErr}
+			if removeErr:=os.RemoveAll(src);removeErr!=nil {
+				cleanupErr:=os.RemoveAll(target)
+				if cleanupErr!=nil{return errors.Join(fmt.Errorf("remove staged source %s: %w",src,removeErr),fmt.Errorf("clean incomplete destination %s: %w",target,cleanupErr))}
+				return fmt.Errorf("remove staged source %s after copy: %w",src,removeErr)
+			}
 		}
 		rb.entries=append(rb.entries,rollbackEntry{target:target})
 	}
 	return nil
 }
 
-func copyNode(src,dst string)error{
-	info,err:=os.Lstat(src);if err!=nil{return err}
-	if info.Mode()&os.ModeSymlink!=0{target,err:=os.Readlink(src);if err!=nil{return err};_ = os.RemoveAll(dst);return os.Symlink(target,dst)}
-	if info.IsDir(){if err:=os.MkdirAll(dst,info.Mode().Perm());err!=nil{return err};return nil}
-	in,err:=os.Open(src);if err!=nil{return err};defer in.Close()
-	out,err:=os.OpenFile(dst,os.O_CREATE|os.O_TRUNC|os.O_WRONLY,info.Mode().Perm());if err!=nil{return err}
-	if _,err:=io.Copy(out,in);err!=nil{_ = out.Close();return err};return out.Close()
+func copyNode(src, dst string) error {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(src)
+		if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(dst); err != nil {
+			return err
+		}
+		return os.Symlink(target, dst)
+	}
+	if info.IsDir() {
+		if err := os.MkdirAll(dst, info.Mode().Perm()); err != nil {
+			return err
+		}
+		children, err := os.ReadDir(src)
+		if err != nil {
+			return err
+		}
+		for _, child := range children {
+			if err := copyNode(filepath.Join(src, child.Name()), filepath.Join(dst, child.Name())); err != nil {
+				return err
+			}
+		}
+		return os.Chmod(dst, info.Mode().Perm())
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		_ = in.Close()
+		return err
+	}
+	_, copyErr := io.Copy(out, in)
+	closeOutErr := out.Close()
+	closeInErr := in.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	if closeOutErr != nil {
+		return closeOutErr
+	}
+	if closeInErr != nil {
+		return closeInErr
+	}
+	return nil
 }
 
 func (m *Manager) installedFromStage(sp stagedPackage)model.InstalledPackage{
@@ -521,7 +575,18 @@ func (m *Manager) installedFromStage(sp stagedPackage)model.InstalledPackage{
 
 func isConfig(p model.Package,path string)bool{for _,x:=range p.ConfigFiles{if filepath.ToSlash(x)==filepath.ToSlash(path){return true}};return false}
 func findPreviousConfigHash(db model.Database,path string)(string,bool){for _,p:=range db.Packages{if h,ok:=p.ConfigHashes[path];ok{return h,true}};return "",false}
-func hashPath(path string)string{f,err:=os.Open(path);if err!=nil{return ""};defer f.Close();h:=sha256.New();_,_=io.Copy(h,f);return hex.EncodeToString(h.Sum(nil))}
+func hashPath(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
 
 func (m *Manager) runScript(sp stagedPackage,name string)error{
 	script:=strings.TrimSpace(sp.Scripts[name]);if script==""{return nil}
@@ -621,7 +686,13 @@ func (m *Manager) Check()error{
 			if err!=nil{fmt.Printf("%s: cannot stat %s: %v\n",name,e.Path,err);problems++;continue}
 			if e.Type=="symlink"{got,err:=os.Readlink(target);if err!=nil||got!=e.LinkTarget{fmt.Printf("%s: symlink mismatch %s\n",name,e.Path);problems++};continue}
 			if e.Type=="file"&&e.SHA256!=""&&p.ConfigHashes[e.Path]==""{
-				got:=hashPath(target);if got!=""&&!strings.EqualFold(got,e.SHA256){fmt.Printf("%s: modified %s\n",name,e.Path);problems++}
+				got, hashErr := hashPath(target)
+				if hashErr != nil {
+					fmt.Printf("%s: cannot hash %s: %v\n", name, e.Path, hashErr)
+					problems++
+					continue
+				}
+				if !strings.EqualFold(got,e.SHA256){fmt.Printf("%s: modified %s\n",name,e.Path);problems++}
 			}
 			_ = info
 		}
