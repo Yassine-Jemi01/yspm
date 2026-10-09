@@ -63,7 +63,11 @@ func (m *Manager) InstallLocal(paths []string, yes, autoSnapshot bool) error {
 			if err != nil { return fmt.Errorf("create pre-install snapshot: %w", err) }
 		}
 		tx, err := m.startTransaction("install-local",requested,snapshotID); if err != nil { return err }
-		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer cleanupStaged(staged)
+		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer func() {
+			if cleanupErr := cleanupStaged(staged); cleanupErr != nil {
+				fmt.Fprintf(os.Stderr, "yspm: staging cleanup failed: %v\n", cleanupErr)
+			}
+		}()
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		rb:=&transactionRollback{}
 		for _,sp:=range staged{
