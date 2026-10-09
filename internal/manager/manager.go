@@ -58,29 +58,44 @@ func (m *Manager) requirePrivileges(op string) error {
 
 func (m *Manager) index() (model.Index, error) {
 	if !config.IsHardcoreRepository() {
-		if idx, err := repo.LoadCachedIndex(); err == nil {
-			if err := repo.ValidateStableIndex(idx); err == nil { return idx, nil }
+		if idx, err := repo.LoadCachedIndexFor(m.User, m.repository); err == nil {
+			return idx, nil
 		}
 	}
-	if err := m.Update(); err != nil { return model.Index{}, err }
-	idx, err := repo.LoadCachedIndex()
-	if err != nil { return model.Index{}, err }
+	if err := m.Update(); err != nil {
+		return model.Index{}, err
+	}
+	idx, err := repo.LoadCachedIndexFor(m.User, m.repository)
+	if err != nil {
+		return model.Index{}, err
+	}
 	return idx, repo.ValidateStableIndex(idx)
 }
 
 func (m *Manager) Update() error {
 	fmt.Printf("Updating stable repository...\n  %s\n", m.repository)
 	var idx model.Index
+	var indexData, signature []byte
 	var err error
 	if config.IsHardcoreRepository() {
 		idx, err = repo.FetchHardcoreIndex(m.repository)
 	} else {
-		idx, err = repo.FetchIndex(m.repository)
+		idx, indexData, signature, err = repo.FetchIndexWithProof(m.repository)
 	}
-	if err != nil { return err }
-	if err := repo.ValidateStableIndex(idx); err != nil { return err }
-	if err := repo.CacheIndex(idx); err != nil { return err }
-	fmt.Printf("Release %s (%s) — %d packages — ABI %s.\n", idx.Release, idx.Channel, len(idx.Packages), valueOr(idx.ABI,"none"))
+	if err != nil {
+		return err
+	}
+	if err := repo.ValidateStableIndex(idx); err != nil {
+		return err
+	}
+	if config.IsHardcoreRepository() {
+		if err := repo.CacheIndexFor(m.User, m.repository, idx); err != nil {
+			return err
+		}
+	} else if err := repo.CacheIndexProofFor(m.User, m.repository, indexData, signature); err != nil {
+		return err
+	}
+	fmt.Printf("Release %s (%s) — %d packages — ABI %s.\n", idx.Release, idx.Channel, len(idx.Packages), valueOr(idx.ABI, "none"))
 	return nil
 }
 
@@ -190,11 +205,17 @@ func (m *Manager) runTransaction(action string,requested []string,yes,upgrade,au
 		plan,err:=m.resolve(idx,db,requested,upgrade);if err!=nil{return err}
 		if len(plan.Packages)==0{fmt.Println("Nothing to do.");return store.SaveDBFor(m.User,db)}
 		if !yes{printInstallPlan(plan,db);if !confirm("Continue? [y/N] "){fmt.Println("Aborted.");return nil}}
-		snapshotID:=""
-		if autoSnapshot&&!m.User{
-			snapshotID,_=CreateSnapshot(m)
+		snapshotID := ""
+		if autoSnapshot && !m.User {
+			snapshotID, err = CreateSnapshot(m)
+			if err != nil {
+				return fmt.Errorf("create requested pre-transaction snapshot: %w", err)
+			}
 		}
-		tx:=m.startTransaction(action,namesFromPackages(plan.Packages),snapshotID)
+		tx, err := m.startTransaction(action, namesFromPackages(plan.Packages), snapshotID)
+		if err != nil {
+			return err
+		}
 		staged,err:=m.prepare(plan.Packages)
 		if err!=nil{return m.finishFailed(tx,err)}
 		defer cleanupStaged(staged)
@@ -464,8 +485,15 @@ func (m *Manager) RemoveMany(names []string,yes,autoSnapshot bool)error{
 			for otherName,other:=range db.Packages{if otherName==name||containsName(names,otherName){continue};if dependsOn(other.Dependencies,name){return fmt.Errorf("cannot remove %q: installed package %q depends on it",name,otherName)}}
 		}
 		if !yes{fmt.Printf("Remove %s? [y/N] ",strings.Join(names,", "));if !confirm(""){fmt.Println("Aborted.");return nil}}
-		if autoSnapshot&&!m.User{_,_=CreateSnapshot(m)}
-		tx:=m.startTransaction("remove",names,"")
+		if autoSnapshot && !m.User {
+			if _, err := CreateSnapshot(m); err != nil {
+				return fmt.Errorf("create requested pre-removal snapshot: %w", err)
+			}
+		}
+		tx, err := m.startTransaction("remove", names, "")
+		if err != nil {
+			return err
+		}
 		rb:=&transactionRollback{}
 		for _,name:=range names{
 			p:=db.Packages[name]
@@ -555,17 +583,28 @@ func (m *Manager) UpgradeRelease(release string,yes,autoSnapshot bool)error{
 	return withLock(m.Paths.State,func()error{
 		db,err:=store.LoadDBFor(m.User);if err!=nil{return err};if db.Release==release{return errors.New("requested release is already installed")}
 		url:=config.ReleaseRepositoryURL(release);fmt.Printf("Loading release %s from %s\n",release,url)
-		idx,err:=repo.FetchIndex(url);if err!=nil{return err}
-		if err:=repo.ValidateStableIndex(idx);err!=nil{return err}
+		idx, indexData, signature, err := repo.FetchIndexWithProof(url)
+		if err != nil { return err }
+		if err := repo.ValidateStableIndex(idx); err != nil { return err }
 		if !yes{fmt.Printf("Upgrade release %s -> %s? [y/N] ",db.Release,release);if !confirm(""){return nil}}
 		plan,err:=m.resolve(idx,db,nil,true);if err!=nil{return fmt.Errorf("release resolution failed: %w",err)}
 		oldRepo:=m.repository;m.repository=url;defer func(){m.repository=oldRepo}()
-		tx:=m.startTransaction("release-upgrade",namesFromPackages(plan.Packages),"")
-		rb:=&transactionRollback{};if autoSnapshot&&!m.User{_,_=CreateSnapshot(m)}
+		snapshotID := ""
+		if autoSnapshot && !m.User {
+			snapshotID, err = CreateSnapshot(m)
+			if err != nil { return fmt.Errorf("create requested pre-release-upgrade snapshot: %w", err) }
+		}
+		tx, err := m.startTransaction("release-upgrade", namesFromPackages(plan.Packages), snapshotID)
+		if err != nil { return err }
+		rb:=&transactionRollback{}
 		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer cleanupStaged(staged)
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		for _,sp:=range staged{if err:=m.commitPackage(sp,db,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)};db.Packages[sp.Pkg.Name]=m.installedFromStage(sp)}
-		db.Release,db.ABI=idx.Release,idx.ABI;if err:=m.saveDatabasePreservingHistory(db);err!=nil{rb.rollback();return m.finishFailed(tx,err)};rb.finalize();_=repo.CacheIndex(idx);return m.finishSuccess(tx)
+		db.Release,db.ABI=idx.Release,idx.ABI;if err:=m.saveDatabasePreservingHistory(db);err!=nil{rb.rollback();return m.finishFailed(tx,err)};if err := repo.CacheIndexProofFor(m.User, url, indexData, signature); err != nil {
+			if finishErr := m.finishSuccess(tx); finishErr != nil { return errors.Join(err, finishErr) }
+			return fmt.Errorf("release upgraded, but repository index cache could not be updated: %w", err)
+		}
+		return m.finishCommitted(tx, rb)
 	})
 }
 
@@ -601,11 +640,48 @@ func (m *Manager) saveDatabasePreservingHistory(db model.Database) error {
 	return store.SaveDBFor(m.User, db)
 }
 
-func (m *Manager) startTransaction(action string,packages []string,snapshot string)model.Transaction{
-	tx:=model.Transaction{ID:newID(),StartedAt:time.Now(),Action:action,Packages:packages,Status:"running",SnapshotBefore:snapshot};_ = store.AddTransactionFor(m.User,tx);return tx
+func (m *Manager) startTransaction(action string, packages []string, snapshot string) (model.Transaction, error) {
+	tx := model.Transaction{
+		ID: newID(), StartedAt: time.Now(), Action: action,
+		Packages: append([]string(nil), packages...), Status: "running", SnapshotBefore: snapshot,
+	}
+	if err := store.AddTransactionFor(m.User, tx); err != nil {
+		return model.Transaction{}, fmt.Errorf("record transaction start: %w", err)
+	}
+	return tx, nil
 }
-func(m *Manager)finishSuccess(tx model.Transaction)error{tx.Status="success";tx.FinishedAt=time.Now();return store.UpdateTransactionFor(m.User,tx)}
-func(m *Manager)finishFailed(tx model.Transaction,err error)error{tx.Status="failed";tx.Error=err.Error();tx.FinishedAt=time.Now();_=store.UpdateTransactionFor(m.User,tx);return err}
+
+func (m *Manager) finishSuccess(tx model.Transaction) error {
+	tx.Status = "success"
+	tx.FinishedAt = time.Now()
+	return store.UpdateTransactionFor(m.User, tx)
+}
+
+func (m *Manager) finishFailed(tx model.Transaction, cause error) error {
+	tx.Status = "failed"
+	tx.Error = cause.Error()
+	tx.FinishedAt = time.Now()
+	if err := store.UpdateTransactionFor(m.User, tx); err != nil {
+		return errors.Join(cause, fmt.Errorf("also failed to record failed transaction %s: %w", tx.ID, err))
+	}
+	return cause
+}
+
+func (m *Manager) rollbackAndFail(tx model.Transaction, rb *transactionRollback, cause error) error {
+	if rollbackErr := rb.rollback(); rollbackErr != nil {
+		cause = errors.Join(cause, fmt.Errorf("rollback failed: %w", rollbackErr))
+	}
+	return m.finishFailed(tx, cause)
+}
+
+func (m *Manager) finishCommitted(tx model.Transaction, rb *transactionRollback) error {
+	cleanupErr := rb.finalize()
+	successErr := m.finishSuccess(tx)
+	if cleanupErr != nil {
+		cleanupErr = fmt.Errorf("transaction committed, but rollback-backup cleanup failed: %w", cleanupErr)
+	}
+	return errors.Join(successErr, cleanupErr)
+}
 
 func (m *Manager) RunBackground(action string,args []string,yes,autoSnapshot bool)error{
 	if !m.User{if err:=m.requirePrivileges("background "+action);err!=nil{return err}}
