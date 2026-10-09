@@ -1,7 +1,7 @@
 package manager
 
 import (
-		"strings"
+	"strings"
 	"unicode"
 )
 
