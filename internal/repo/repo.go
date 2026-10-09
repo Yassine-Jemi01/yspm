@@ -370,6 +370,40 @@ func VerifySHA256(path, expected string) error {
 }
 
 func Download(source, destination string) error {
+	return DownloadWithLimit(source, destination, maxDownloadBytes)
+}
+
+// DownloadPackage enforces the global maximum and, if provided, the exact
+// repository-declared archive size.
+func DownloadPackage(source, destination string, expectedSize int64) error {
+	limit := maxDownloadBytes
+	if expectedSize > 0 {
+		if expectedSize > maxDownloadBytes {
+			return fmt.Errorf("package download size %d exceeds the %d-byte policy limit", expectedSize, maxDownloadBytes)
+		}
+		limit = expectedSize
+	}
+	if err := DownloadWithLimit(source, destination, limit); err != nil {
+		return err
+	}
+	if expectedSize > 0 {
+		info, err := os.Stat(destination)
+		if err != nil {
+			_ = os.Remove(destination)
+			return err
+		}
+		if info.Size() != expectedSize {
+			_ = os.Remove(destination)
+			return fmt.Errorf("download size mismatch: expected %d bytes, got %d", expectedSize, info.Size())
+		}
+	}
+	return nil
+}
+
+func DownloadWithLimit(source, destination string, maxBytes int64) error {
+	if maxBytes <= 0 || maxBytes > maxDownloadBytes {
+		maxBytes = maxDownloadBytes
+	}
 	if u, err := url.Parse(source); err == nil && u.Scheme != "" && u.Scheme != "file" {
 		resp, err := (&http.Client{Timeout: 10 * time.Minute}).Get(source)
 		if err != nil {
@@ -379,7 +413,10 @@ func Download(source, destination string) error {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return fmt.Errorf("download failed: HTTP %s", resp.Status)
 		}
-		return writeAtomic(resp.Body, destination)
+		if resp.ContentLength > maxBytes {
+			return fmt.Errorf("download content length %d exceeds the %d-byte limit", resp.ContentLength, maxBytes)
+		}
+		return writeAtomicLimit(resp.Body, destination, maxBytes)
 	}
 	if u, err := url.Parse(source); err == nil && u.Scheme == "file" {
 		source = u.Path
@@ -389,10 +426,10 @@ func Download(source, destination string) error {
 		return err
 	}
 	defer f.Close()
-	return writeAtomic(f, destination)
+	return writeAtomicLimit(f, destination, maxBytes)
 }
 
-func writeAtomic(r io.Reader, destination string) error {
+func writeAtomicLimit(r io.Reader, destination string, maxBytes int64) error {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return err
 	}
@@ -402,9 +439,14 @@ func writeAtomic(r io.Reader, destination string) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if _, err := io.Copy(tmp, r); err != nil {
+	n, err := io.Copy(tmp, io.LimitReader(r, maxBytes+1))
+	if err != nil {
 		_ = tmp.Close()
 		return err
+	}
+	if n > maxBytes {
+		_ = tmp.Close()
+		return fmt.Errorf("download exceeds the %d-byte limit", maxBytes)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
@@ -415,6 +457,7 @@ func writeAtomic(r io.Reader, destination string) error {
 	}
 	return os.Rename(tmpPath, destination)
 }
+
 
 const (
 	maxTarEntries       = 100_000
@@ -935,38 +978,82 @@ func extractZip(archivePath, destination string) error {
 		return err
 	}
 	defer r.Close()
+
+	type zipEntry struct {
+		file *zip.File
+		name string
+	}
+	entries := make([]zipEntry, 0, len(r.File))
+	seen := make(map[string]bool, len(r.File))
+	var expanded uint64
+	if len(r.File) > maxZipEntries {
+		return fmt.Errorf("ZIP archive exceeds the %d-entry limit", maxZipEntries)
+	}
 	for _, f := range r.File {
-		name := filepath.Clean(f.Name)
-		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
-			return fmt.Errorf("unsafe archive path %q", f.Name)
+		name := strings.TrimSuffix(f.Name, "/")
+		if name == "" {
+			continue
 		}
-		target := filepath.Join(destination, name)
-		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(destination)+string(os.PathSeparator)) && target != destination {
-			return fmt.Errorf("archive escapes destination: %q", f.Name)
+		clean, err := normalizeTarPath(name)
+		if err != nil || clean == "." {
+			return fmt.Errorf("unsafe ZIP archive path %q", f.Name)
 		}
+		if seen[clean] {
+			return fmt.Errorf("duplicate ZIP archive path %q", clean)
+		}
+		seen[clean] = true
+		isDir := f.FileInfo().IsDir()
+		mode := f.Mode()
+		if !isDir && mode.Type() != 0 && !mode.IsRegular() {
+			return fmt.Errorf("unsupported ZIP entry type for %q", f.Name)
+		}
+		if !isDir {
+			if f.UncompressedSize64 > maxZipEntryBytes {
+				return fmt.Errorf("ZIP entry %q exceeds the %d-byte per-file limit", clean, maxZipEntryBytes)
+			}
+			if expanded > maxZipExpandedBytes-f.UncompressedSize64 {
+				return fmt.Errorf("ZIP archive exceeds the %d-byte expanded-size limit", maxZipExpandedBytes)
+			}
+			expanded += f.UncompressedSize64
+		}
+		entries = append(entries, zipEntry{file: f, name: clean})
+	}
+	root, err := prepareTarDestination(destination)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		f, name := entry.file, entry.name
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if _, err := ensureTarDirectories(root, name); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		parent, err := ensureTarDirectories(root, pathpkg.Dir(name))
+		if err != nil {
 			return err
 		}
+		target := filepath.Join(parent, filepath.Base(filepath.FromSlash(name)))
 		in, err := f.Open()
 		if err != nil {
 			return err
 		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
 			_ = in.Close()
-			return err
+			return fmt.Errorf("create ZIP entry %q: %w", name, err)
 		}
-		_, copyErr := io.Copy(out, in)
+		n, copyErr := io.Copy(out, io.LimitReader(in, int64(f.UncompressedSize64)+1))
 		closeOutErr := out.Close()
 		closeInErr := in.Close()
 		if copyErr != nil {
+			_ = os.Remove(target)
 			return copyErr
+		}
+		if uint64(n) != f.UncompressedSize64 {
+			_ = os.Remove(target)
+			return fmt.Errorf("ZIP entry %q expanded to %d bytes; header declared %d", name, n, f.UncompressedSize64)
 		}
 		if closeOutErr != nil {
 			return closeOutErr
@@ -974,10 +1061,16 @@ func extractZip(archivePath, destination string) error {
 		if closeInErr != nil {
 			return closeInErr
 		}
+		mode := f.Mode().Perm() & 0o777
+		if mode == 0 {
+			mode = 0o644
+		}
+		if err := os.Chmod(target, mode); err != nil {
+			return err
+		}
 	}
 	return nil
 }
-
 func FindEntry(root, entry string) (string, error) {
 	if entry == "" {
 		return "", errors.New("package has no entry")
