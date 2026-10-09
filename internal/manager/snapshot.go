@@ -79,3 +79,15 @@ func RestoreSnapshot(m *Manager,id string) error {
 	return nil
 }
 
+
+ // CreateSnapshotWithLock serializes the standalone snapshot command with
+ // package-manager transactions that also persist snapshot metadata.
+func CreateSnapshotWithLock(m *Manager) (string, error) {
+	var id string
+	err := withLock(m.Paths.State, func() error {
+		var err error
+		id, err = CreateSnapshot(m)
+		return err
+	})
+	return id, err
+}
