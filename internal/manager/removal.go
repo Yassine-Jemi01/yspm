@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Yassine-Jemi01/yspm/internal/model"
+	"github.com/Yassine-Jemi01/yspm/internal/repo"
 )
 
 func RemovePackageFiles(m *Manager, p model.InstalledPackage, rb *transactionRollback) error {
@@ -15,7 +16,7 @@ func RemovePackageFiles(m *Manager, p model.InstalledPackage, rb *transactionRol
 		rel:=filepath.Clean(filepath.FromSlash(e.Path))
 		if filepath.IsAbs(rel)||rel==".."||strings.HasPrefix(rel,".."+string(os.PathSeparator)){return fmt.Errorf("unsafe installed path %q",e.Path)}
 		target:=filepath.Join(m.Paths.Root,rel)
-		if !within(m.Paths.Root,target){return fmt.Errorf("installed path escapes root: %s",e.Path)}
+		if !repo.WithinRoot(m.Paths.Root,target){return fmt.Errorf("installed path escapes root: %s",e.Path)}
 		_,err:=os.Lstat(target)
 		if os.IsNotExist(err){continue}
 		if err!=nil{return err}
