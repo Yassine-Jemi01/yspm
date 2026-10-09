@@ -310,6 +310,11 @@ func allSatisfied(v string,cs []string)bool{for _,c:=range cs{if op,ver:=parseCo
 func satisfies(v,c string)bool{if c==""{return true};op,ver:=parseConstraint("x"+c);switch op{case "=":return compareVersion(v,ver)==0;case "!=":return compareVersion(v,ver)!=0;case ">":return compareVersion(v,ver)>0;case ">=":return compareVersion(v,ver)>=0;case "<":return compareVersion(v,ver)<0;case "<=":return compareVersion(v,ver)<=0};return true}
 
 func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
+	for _, p := range pkgs {
+		if err := repo.ValidateInstallPackage(p); err != nil {
+			return nil, fmt.Errorf("refusing to stage package %q: %w", p.Name, err)
+		}
+	}
 	if err:=os.MkdirAll(m.Paths.Cache,0o755);err!=nil{return nil,err};if err:=os.MkdirAll(m.Paths.Staging,0o755);err!=nil{return nil,err}
 	sem:=make(chan struct{},4);results:=make([]stagedPackage,len(pkgs));var wg sync.WaitGroup;errCh:=make(chan error,len(pkgs))
 	for i,p:=range pkgs{i,p=i,p;wg.Add(1);go func(){defer wg.Done();sem<-struct{}{};defer func(){<-sem}()
