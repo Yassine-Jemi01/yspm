@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,8 +28,11 @@ func (m *Manager) hydrateHardcorePackage(p model.Package) (model.Package, error)
 			return p, fmt.Errorf("download %s: %w", p.Name, err)
 		}
 		if err := repo.VerifySHA256(archive, p.SHA256); err != nil {
-			_ = os.Remove(archive)
-			return p, fmt.Errorf("verify %s: %w", p.Name, err)
+			verifyErr := fmt.Errorf("verify %s: %w", p.Name, err)
+			if cleanupErr := os.Remove(archive); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+				verifyErr = errors.Join(verifyErr, fmt.Errorf("remove invalid archive %s: %w", archive, cleanupErr))
+			}
+			return p, verifyErr
 		}
 	}
 	h, err := repo.InspectHardcoreArchive(archive)
