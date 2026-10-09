@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
