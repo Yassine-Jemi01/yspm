@@ -341,7 +341,7 @@ func (m *Manager) prepare(pkgs []model.Package)([]stagedPackage,error){
 		sp:=stagedPackage{Pkg:p,Scripts:map[string]string{}};archive:=filepath.Join(m.Paths.Cache,packageFilename(p))
 		if p.URL==""&&p.Kind!="meta"{errCh<-fmt.Errorf("package %s has no URL",p.Name);return}
 		valid:=false;if _,err:=os.Stat(archive);err==nil&&p.SHA256!=""{valid=repo.VerifySHA256(archive,p.SHA256)==nil}
-		if p.Kind!="meta"&&!valid{if err:=repo.Download(p.URL,archive);err!=nil{errCh<-fmt.Errorf("download %s: %w",p.Name,err);return};if err:=repo.VerifySHA256(archive,p.SHA256);err!=nil{_ = os.Remove(archive);errCh<-fmt.Errorf("verify %s: %w",p.Name,err);return}}
+		if p.Kind!="meta"&&!valid{if err:=repo.DownloadPackage(p.URL,archive,p.Size);err!=nil{errCh<-fmt.Errorf("download %s: %w",p.Name,err);return};if err:=repo.VerifySHA256(archive,p.SHA256);err!=nil{_ = os.Remove(archive);errCh<-fmt.Errorf("verify %s: %w",p.Name,err);return}}
 		stage,err:=os.MkdirTemp(m.Paths.Staging,p.Name+"-*");if err!=nil{errCh<-err;return};sp.Stage=stage;sp.Archive=archive
 		if p.Kind!="meta"{
 			if p.Format==repo.HardcorePackageFormat {
@@ -628,11 +628,16 @@ func (m *Manager) UpgradeRelease(release string,yes,autoSnapshot bool)error{
 		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer cleanupStaged(staged)
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		for _,sp:=range staged{if err:=m.commitPackage(sp,db,rb);err!=nil{return m.rollbackAndFail(tx,rb,err)};db.Packages[sp.Pkg.Name]=m.installedFromStage(sp)}
-		db.Release,db.ABI=idx.Release,idx.ABI;if err:=m.saveDatabasePreservingHistory(db);err!=nil{return m.rollbackAndFail(tx,rb,err)};if err := repo.CacheIndexProofFor(m.User, url, indexData, signature); err != nil {
-			if finishErr := m.finishSuccess(tx); finishErr != nil { return errors.Join(err, finishErr) }
-			return fmt.Errorf("release upgraded, but repository index cache could not be updated: %w", err)
+		db.Release, db.ABI = idx.Release, idx.ABI
+		if err := m.saveDatabasePreservingHistory(db); err != nil {
+			return m.rollbackAndFail(tx, rb, err)
 		}
-		return m.finishCommitted(tx, rb)
+		cacheErr := repo.CacheIndexProofFor(m.User, url, indexData, signature)
+		finishErr := m.finishCommitted(tx, rb)
+		if cacheErr != nil {
+			return errors.Join(fmt.Errorf("release upgraded, but repository index cache could not be updated: %w", cacheErr), finishErr)
+		}
+		return finishErr
 	})
 }
 
