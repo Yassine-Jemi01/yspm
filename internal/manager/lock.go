@@ -8,7 +8,7 @@ import (
 	"syscall"
 )
 
-func withLock(state string, fn func() error) error {
+func withLock(state string, fn func() error) (retErr error) {
 	if err := os.MkdirAll(state, 0o755); err != nil {
 		return fmt.Errorf("create transaction state directory: %w", err)
 	}
@@ -20,7 +20,11 @@ func withLock(state string, fn func() error) error {
 	if err != nil {
 		return fmt.Errorf("open transaction lock: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close transaction lock: %w", closeErr))
+		}
+	}()
 
 	for {
 		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
@@ -33,7 +37,9 @@ func withLock(state string, fn func() error) error {
 		return fmt.Errorf("acquire transaction lock: %w", err)
 	}
 	defer func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		if unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); unlockErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("release transaction lock: %w", unlockErr))
+		}
 	}()
 
 	if err := f.Truncate(0); err != nil {
