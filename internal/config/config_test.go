@@ -19,9 +19,9 @@ func clearPathOverrides(t *testing.T) {
 func TestNewPathsUsesSeparateUserAndSystemLayouts(t *testing.T) {
 	home := t.TempDir()
 	systemRoot := t.TempDir()
+	clearPathOverrides(t)
 	t.Setenv("HOME", home)
 	t.Setenv("YSPM_ROOT", systemRoot)
-	clearPathOverrides(t)
 
 	userPaths, err := NewPaths(true)
 	if err != nil {
