@@ -210,7 +210,7 @@ func (m *Manager) runTransaction(action string,requested []string,yes,upgrade,au
 			installed.Explicit=containsName(plan.Requested,sp.Pkg.Name)||installed.Explicit
 			db.Packages[sp.Pkg.Name]=installed
 		}
-		if err:=store.SaveDBFor(m.User,db);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
+		if err:=m.saveDatabasePreservingHistory(db);err!=nil{rollback.rollback();return m.finishFailed(tx,err)}
 		rollback.finalize()
 		return m.finishSuccess(tx)
 	})
@@ -474,7 +474,7 @@ func (m *Manager) RemoveMany(names []string,yes,autoSnapshot bool)error{
 			}
 			delete(db.Packages,name)
 		}
-		if err:=store.SaveDBFor(m.User,db);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
+		if err:=m.saveDatabasePreservingHistory(db);err!=nil{rb.rollback();return m.finishFailed(tx,err)}
 				rb.finalize();return m.finishSuccess(tx)
 	})
 }
@@ -560,7 +560,7 @@ func (m *Manager) UpgradeRelease(release string,yes,autoSnapshot bool)error{
 		staged,err:=m.prepare(plan.Packages);if err!=nil{return m.finishFailed(tx,err)};defer cleanupStaged(staged)
 		if err:=m.validateConflicts(staged,db);err!=nil{return m.finishFailed(tx,err)}
 		for _,sp:=range staged{if err:=m.commitPackage(sp,db,rb);err!=nil{rb.rollback();return m.finishFailed(tx,err)};db.Packages[sp.Pkg.Name]=m.installedFromStage(sp)}
-		db.Release,db.ABI=idx.Release,idx.ABI;if err:=store.SaveDBFor(m.User,db);err!=nil{rb.rollback();return m.finishFailed(tx,err)};rb.finalize();_=repo.CacheIndex(idx);return m.finishSuccess(tx)
+		db.Release,db.ABI=idx.Release,idx.ABI;if err:=m.saveDatabasePreservingHistory(db);err!=nil{rb.rollback();return m.finishFailed(tx,err)};rb.finalize();_=repo.CacheIndex(idx);return m.finishSuccess(tx)
 	})
 }
 
@@ -581,6 +581,20 @@ func (m *Manager) Build(root,output,name,version,desc,abi,arch,license,maintaine
 func (m *Manager) RepoIndex(dir,output,baseURL,release,abi string)error{_,err:=repo.BuildRepository(dir,output,baseURL,release,abi);return err}
 func (m *Manager) RepoSign(index,key,sig string)error{return repo.SignRepositoryIndex(index,key,sig)}
 func (m *Manager) GenerateKey(pub,priv string)error{return repo.GenerateKeypair(pub,priv)}
+
+// saveDatabasePreservingHistory merges the latest transaction and snapshot records
+// into a transaction's in-memory package database before persisting it. The
+// transaction was recorded separately by startTransaction, so saving an older
+// in-memory database must not erase that newly-created history entry.
+func (m *Manager) saveDatabasePreservingHistory(db model.Database) error {
+	latest, err := store.LoadDBFor(m.User)
+	if err != nil {
+		return err
+	}
+	db.Transactions = latest.Transactions
+	db.Snapshots = latest.Snapshots
+	return store.SaveDBFor(m.User, db)
+}
 
 func (m *Manager) startTransaction(action string,packages []string,snapshot string)model.Transaction{
 	tx:=model.Transaction{ID:newID(),StartedAt:time.Now(),Action:action,Packages:packages,Status:"running",SnapshotBefore:snapshot};_ = store.AddTransactionFor(m.User,tx);return tx
