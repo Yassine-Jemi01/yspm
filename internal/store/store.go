@@ -293,4 +293,3 @@ func SaveSnapshotFor(user bool, snapshot model.Snapshot) error {
 		return writeDBPath(p.Database, db)
 	})
 }
-
