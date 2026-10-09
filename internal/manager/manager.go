@@ -58,12 +58,12 @@ func (m *Manager) requirePrivileges(op string) error {
 
 func (m *Manager) index() (model.Index, error) {
 	if !config.IsHardcoreRepository() {
-		if idx, err := repo.LoadCachedIndex(); err == nil {
+		if idx, err := repo.LoadCachedIndexFor(m.User); err == nil {
 			if err := repo.ValidateStableIndex(idx); err == nil { return idx, nil }
 		}
 	}
 	if err := m.Update(); err != nil { return model.Index{}, err }
-	idx, err := repo.LoadCachedIndex()
+	idx, err := repo.LoadCachedIndexFor(m.User)
 	if err != nil { return model.Index{}, err }
 	return idx, repo.ValidateStableIndex(idx)
 }
@@ -71,15 +71,27 @@ func (m *Manager) index() (model.Index, error) {
 func (m *Manager) Update() error {
 	fmt.Printf("Updating stable repository...\n  %s\n", m.repository)
 	var idx model.Index
+	var rawIndex, signature []byte
 	var err error
 	if config.IsHardcoreRepository() {
 		idx, err = repo.FetchHardcoreIndex(m.repository)
 	} else {
-		idx, err = repo.FetchIndex(m.repository)
+		idx, rawIndex, signature, err = repo.FetchIndexData(m.repository)
 	}
-	if err != nil { return err }
-	if err := repo.ValidateStableIndex(idx); err != nil { return err }
-	if err := repo.CacheIndex(idx); err != nil { return err }
+	if err != nil {
+		return err
+	}
+	if err := repo.ValidateStableIndex(idx); err != nil {
+		return err
+	}
+	if config.IsHardcoreRepository() {
+		err = repo.CacheIndexFor(idx, m.User)
+	} else {
+		err = repo.CacheFetchedIndexFor(rawIndex, signature, m.User)
+	}
+	if err != nil {
+		return fmt.Errorf("cache repository index: %w", err)
+	}
 	fmt.Printf("Release %s (%s) — %d packages — ABI %s.\n", idx.Release, idx.Channel, len(idx.Packages), valueOr(idx.ABI,"none"))
 	return nil
 }
