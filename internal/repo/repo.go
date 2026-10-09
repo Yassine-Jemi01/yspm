@@ -20,7 +20,6 @@ import (
 	"os/exec"
 	pathpkg "path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -41,10 +40,6 @@ func indexCachePathFor(user bool) (string, error) {
 		return "", err
 	}
 	return filepath.Join(d, "index.json"), nil
-}
-
-func indexCachePath() (string, error) {
-	return indexCachePathFor(os.Geteuid() != 0)
 }
 
 const (
@@ -203,11 +198,6 @@ func fetchAndVerifyIndexSignature(data []byte) ([]byte, error) {
 	return sig, nil
 }
 
-func verifyIndexSignature(data []byte) error {
-	_, err := fetchAndVerifyIndexSignature(data)
-	return err
-}
-
 func CacheIndex(idx model.Index) error {
 	return CacheIndexFor(idx, os.Geteuid() != 0)
 }
@@ -307,17 +297,10 @@ func LoadCachedIndexFor(user bool) (model.Index, error) {
 	return idx, nil
 }
 
-func CurrentSystem() (string, string) { return runtime.GOOS, runtime.GOARCH }
-
 func SupportsArchitecture(p model.Package, requested string) bool {
 	requested = config.NormalizeArch(requested)
 	if p.Architecture == "" { return true }
 	return config.NormalizeArch(p.Architecture) == requested
-}
-
-func SupportsCurrentSystem(p model.Package) bool {
-	osName, arch := CurrentSystem()
-	return (p.OS == "" || p.OS == osName || (osName == "linux" && p.OS == "linux")) && SupportsArchitecture(p, arch)
 }
 
 func ValidateInstallPackage(p model.Package) error {
