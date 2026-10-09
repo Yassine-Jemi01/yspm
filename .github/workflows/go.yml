@@ -19,7 +19,7 @@ jobs:
           go-version: ${{ matrix.go-version }}
       - name: Check formatting for regression tests
         run: |
-          files="cmd/yspm/main_test.go internal/config/config_test.go internal/manager/lock_test.go internal/manager/transaction_history_test.go internal/manager/background_args_test.go internal/manager/version_test.go internal/repo/index_cache_test.go internal/repo/release_test.go internal/repo/download_test.go"
+          files="cmd/yspm/main_test.go internal/config/config_test.go internal/manager/lock_test.go internal/manager/transaction_history_test.go internal/manager/background_args_test.go internal/manager/version_test.go internal/repo/index_cache_test.go internal/repo/release_test.go internal/repo/download_test.go internal/repo/repo_test.go"
           unformatted="$(gofmt -l $files)"
           if [ -n "$unformatted" ]; then
             printf 'Unformatted Go test files:\n%s\n' "$unformatted"
