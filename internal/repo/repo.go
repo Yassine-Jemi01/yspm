@@ -19,7 +19,6 @@ import (
 	"os/exec"
 	pathpkg "path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -294,19 +293,6 @@ func LoadCachedIndexFor(user bool, source string) (model.Index, error) {
 
 func LoadCachedIndex() (model.Index, error) {
 	return LoadCachedIndexFor(os.Geteuid() != 0, "")
-}
-
-func CurrentSystem() (string, string) { return runtime.GOOS, runtime.GOARCH }
-
-func SupportsArchitecture(p model.Package, requested string) bool {
-	requested = config.NormalizeArch(requested)
-	if p.Architecture == "" { return true }
-	return config.NormalizeArch(p.Architecture) == requested
-}
-
-func SupportsCurrentSystem(p model.Package) bool {
-	osName, arch := CurrentSystem()
-	return (p.OS == "" || p.OS == osName || (osName == "linux" && p.OS == "linux")) && SupportsArchitecture(p, arch)
 }
 
 func ValidateInstallPackage(p model.Package) error {
