@@ -327,25 +327,26 @@ func parseDependency(s string) dependencyRequest {
 	s = strings.TrimSpace(s)
 	arch := ""
 
-	op, ver := parseConstraint(s)
+	op, _ := parseConstraint(s)
 	opIndex := -1
 	if op != "" {
 		opIndex = strings.Index(s, op)
 	}
 	if colon := strings.LastIndex(s, ":"); colon > 0 && (opIndex < 0 || colon < opIndex) {
-		candidate := strings.TrimSpace(s[colon+1:])
+		candidateEnd := len(s)
+		if opIndex > colon {
+			candidateEnd = opIndex
+		}
+		candidate := strings.TrimSpace(s[colon+1 : candidateEnd])
 		if isArchitectureSuffix(candidate) {
 			arch = config.NormalizeArch(candidate)
-			s = strings.TrimSpace(s[:colon])
-			op, ver = parseConstraint(s)
-			opIndex = -1
-			if op != "" {
-				opIndex = strings.Index(s, op)
-			}
+			s = strings.TrimSpace(s[:colon] + s[candidateEnd:])
 		}
 	}
+	op, ver := parseConstraint(s)
 	name := s
-	if opIndex >= 0 {
+	if op != "" {
+		opIndex := strings.Index(s, op)
 		name = strings.TrimSpace(s[:opIndex])
 		ver = strings.TrimSpace(s[opIndex+len(op):])
 	}
