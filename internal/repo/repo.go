@@ -958,7 +958,7 @@ func extractZip(archivePath, destination string) error {
 		name string
 	}
 	entries := make([]zipEntry, 0, len(r.File))
-	byName := make(map[string]bool, len(r.File))
+	byName := make(map[string]zipEntry, len(r.File))
 	var expanded uint64
 	for _, f := range r.File {
 		name, err := normalizeTarPath(f.Name)
@@ -971,7 +971,8 @@ func extractZip(archivePath, destination string) error {
 		if byName[name] {
 			return fmt.Errorf("duplicate ZIP archive path %q", name)
 		}
-		byName[name] = true
+		entry := zipEntry{file: f, name: name}
+		byName[name] = entry
 		if f.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("ZIP symlink entries are not supported: %q", f.Name)
 		}
@@ -988,17 +989,12 @@ func extractZip(archivePath, destination string) error {
 			}
 			expanded += f.UncompressedSize64
 		}
-		entries = append(entries, zipEntry{file: f, name: name})
+		entries = append(entries, entry)
 	}
 	for _, entry := range entries {
 		for parent := pathpkg.Dir(entry.name); parent != "." && parent != "/"; parent = pathpkg.Dir(parent) {
-			if _, exists := byName[parent]; exists {
-				// The type is checked below using the actual ZIP entries.
-				for _, candidate := range entries {
-					if candidate.name == parent && !candidate.file.FileInfo().IsDir() {
-						return fmt.Errorf("ZIP path %q is nested beneath non-directory entry %q", entry.name, parent)
-					}
-				}
+			if parentEntry, exists := byName[parent]; exists && !parentEntry.file.FileInfo().IsDir() {
+				return fmt.Errorf("ZIP path %q is nested beneath non-directory entry %q", entry.name, parent)
 			}
 		}
 	}
