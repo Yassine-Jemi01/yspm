@@ -234,7 +234,7 @@ func has(xs []string,want string)bool{for _,x:=range xs{if x==want{return true}}
 
 func isLocalArchiveArg(a string) bool {
 	x:=strings.ToLower(strings.TrimSpace(a))
-	return strings.HasSuffix(x,".yspkg")||strings.HasSuffix(x,".tar")||strings.HasSuffix(x,".tar.gz")||strings.HasSuffix(x,".tgz")||strings.HasSuffix(x,".tar.xz")||strings.HasSuffix(x,".tar.zst")
+	return strings.HasSuffix(x,".yspkg")||strings.HasSuffix(x,".tar")||strings.HasSuffix(x,".tar.gz")||strings.HasSuffix(x,".tgz")||strings.HasSuffix(x,".tar.xz")||strings.HasSuffix(x,".tar.zst")||strings.HasSuffix(x,".zip")
 }
 
 func valueAfter(xs []string,want string)string{for i,x:=range xs{if x==want&&i+1<len(xs){return xs[i+1]};if strings.HasPrefix(x,want+"="){return strings.TrimPrefix(x,want+"=")}};return ""}
