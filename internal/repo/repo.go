@@ -616,37 +616,38 @@ func spoolTarStream(archivePath, format string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	tmp, err := os.CreateTemp("", "yspm-validated-tar-*.tar")
 	if err != nil {
-		_ = source.Close()
+		if closeErr := source.Close(); closeErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("close source archive: %w", closeErr))
+		}
 		return nil, err
 	}
-	cleanup := func() {
-		_ = tmp.Close()
-		_ = os.Remove(tmp.Name())
+	cleanup := func() error {
+		var cleanupErr error
+		if closeErr := tmp.Close(); closeErr != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("close temporary tar: %w", closeErr))
+		}
+		if removeErr := os.Remove(tmp.Name()); removeErr != nil && !os.IsNotExist(removeErr) {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove temporary tar: %w", removeErr))
+		}
+		return cleanupErr
 	}
 
 	n, copyErr := io.Copy(tmp, io.LimitReader(source, maxTarStreamBytes+1))
 	closeErr := source.Close()
 	if n > maxTarStreamBytes {
-		cleanup()
-		return nil, fmt.Errorf("decompressed tar stream exceeds the %d-byte limit", maxTarStreamBytes)
+		limitErr := fmt.Errorf("decompressed tar stream exceeds the %d-byte limit", maxTarStreamBytes)
+		return nil, errors.Join(limitErr, closeErr, cleanup())
 	}
 	if copyErr != nil {
-		cleanup()
-		if closeErr != nil {
-			return nil, fmt.Errorf("read tar stream: %v; close decompressor: %w", copyErr, closeErr)
-		}
-		return nil, fmt.Errorf("read tar stream: %w", copyErr)
+		return nil, errors.Join(fmt.Errorf("read tar stream: %w", copyErr), closeErr, cleanup())
 	}
 	if closeErr != nil {
-		cleanup()
-		return nil, closeErr
+		return nil, errors.Join(closeErr, cleanup())
 	}
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		cleanup()
-		return nil, err
+		return nil, errors.Join(err, cleanup())
 	}
 	return tmp, nil
 }
@@ -841,7 +842,7 @@ func ensureTarDirectories(root, relative string) (string, error) {
 	return current, nil
 }
 
-func extractTar(archivePath, format, destination string) error {
+func extractTar(archivePath, format, destination string) (retErr error) {
 	// Decompress once into a bounded private file, then validate all members
 	// before creating any archive-controlled filesystem entries.
 	archive, err := spoolTarStream(archivePath, format)
@@ -850,8 +851,12 @@ func extractTar(archivePath, format, destination string) error {
 	}
 	defer func() {
 		name := archive.Name()
-		_ = archive.Close()
-		_ = os.Remove(name)
+		if closeErr := archive.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close validated tar: %w", closeErr))
+		}
+		if removeErr := os.Remove(name); removeErr != nil && !os.IsNotExist(removeErr) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove validated tar %s: %w", name, removeErr))
+		}
 	}()
 
 	entries, err := validateTarArchive(archive)
@@ -978,12 +983,16 @@ func extractTar(archivePath, format, destination string) error {
 	return nil
 }
 
-func extractZip(archivePath, destination string) error {
+func extractZip(archivePath, destination string) (retErr error) {
 	r, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return err
 	}
-	defer r.Close()
+	defer func() {
+		if closeErr := r.Close(); closeErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close ZIP archive: %w", closeErr))
+		}
+	}()
 	if len(r.File) > maxZipEntries {
 		return fmt.Errorf("ZIP archive exceeds the %d-entry limit", maxZipEntries)
 	}
@@ -1061,22 +1070,31 @@ func extractZip(archivePath, destination string) error {
 		}
 		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
-			_ = in.Close()
+			if closeErr := in.Close(); closeErr != nil {
+				return errors.Join(err, fmt.Errorf("close ZIP entry %s: %w", entry.name, closeErr))
+			}
 			return err
 		}
 		n, copyErr := io.CopyN(out, in, int64(entry.file.UncompressedSize64))
 		closeOutErr := out.Close()
 		closeInErr := in.Close()
 		if copyErr != nil {
-			_ = os.Remove(target)
-			return fmt.Errorf("extract ZIP entry %q after %d bytes: %w", entry.name, n, copyErr)
+			copyErr = fmt.Errorf("extract ZIP entry %q after %d bytes: %w", entry.name, n, copyErr)
+			if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+				copyErr = errors.Join(copyErr, fmt.Errorf("remove partial ZIP entry %s: %w", target, removeErr))
+			}
+			return copyErr
 		}
 		if closeOutErr != nil {
-			_ = os.Remove(target)
+			if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+				return errors.Join(closeOutErr, fmt.Errorf("remove incomplete ZIP entry %s: %w", target, removeErr))
+			}
 			return closeOutErr
 		}
 		if closeInErr != nil {
-			_ = os.Remove(target)
+			if removeErr := os.Remove(target); removeErr != nil && !os.IsNotExist(removeErr) {
+				return errors.Join(closeInErr, fmt.Errorf("remove incomplete ZIP entry %s: %w", target, removeErr))
+			}
 			return closeInErr
 		}
 		if err := os.Chmod(target, entry.file.Mode().Perm()&0o777); err != nil {
