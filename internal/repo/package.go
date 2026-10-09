@@ -362,6 +362,9 @@ func BuildRepository(dir, output, baseURL, release, abi string) (model.Index, er
 		if idx.Packages[i].Name==idx.Packages[j].Name { return idx.Packages[i].Architecture < idx.Packages[j].Architecture }
 		return idx.Packages[i].Name < idx.Packages[j].Name
 	})
+	if err := ValidateStableIndex(idx); err != nil {
+		return model.Index{}, fmt.Errorf("refusing to write invalid repository index: %w", err)
+	}
 	data, err := json.MarshalIndent(idx, "", "  ")
 	if err != nil { return model.Index{}, err }
 	if err := os.WriteFile(output, append(data,'\n'), 0o644); err != nil { return model.Index{}, err }
