@@ -398,7 +398,7 @@ func writeAtomic(r io.Reader, destination string) error {
 	return writeAtomicLimit(r, destination, maxDownloadBytes)
 }
 
-func writeAtomicLimit(r io.Reader, destination string, limit int64) error {
+func writeAtomicLimit(r io.Reader, destination string, limit int64) (retErr error) {
 	if limit <= 0 {
 		return errors.New("invalid download size limit")
 	}
@@ -410,18 +410,30 @@ func writeAtomicLimit(r io.Reader, destination string, limit int64) error {
 		return err
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	defer func() {
+		if cleanupErr := os.Remove(tmpPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove temporary download %s: %w", tmpPath, cleanupErr))
+		}
+	}()
 	n, err := io.Copy(tmp, io.LimitReader(r, limit+1))
 	if err != nil {
-		_ = tmp.Close()
+		if closeErr := tmp.Close(); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("close partial download: %w", closeErr))
+		}
 		return err
 	}
 	if n > limit {
-		_ = tmp.Close()
-		return fmt.Errorf("download exceeds %d-byte limit", limit)
+		closeErr := tmp.Close()
+		limitErr := fmt.Errorf("download exceeds %d-byte limit", limit)
+		if closeErr != nil {
+			return errors.Join(limitErr, fmt.Errorf("close oversized download: %w", closeErr))
+		}
+		return limitErr
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
+		if closeErr := tmp.Close(); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("close unsynced download: %w", closeErr))
+		}
 		return err
 	}
 	if err := tmp.Close(); err != nil {
@@ -512,7 +524,12 @@ func openTarStream(archivePath, format string) (io.ReadCloser, error) {
 		compression = "zstd"
 	case "tar":
 		var magic [6]byte
-		_, _ = file.ReadAt(magic[:], 0)
+		if _, readErr := file.ReadAt(magic[:], 0); readErr != nil && !errors.Is(readErr, io.EOF) {
+			if closeErr := file.Close(); closeErr != nil {
+				return nil, errors.Join(readErr, fmt.Errorf("close tar archive: %w", closeErr))
+			}
+			return nil, fmt.Errorf("inspect tar compression header: %w", readErr)
+		}
 		switch {
 		case magic[0] == 0x1f && magic[1] == 0x8b:
 			compression = "gzip"
@@ -524,12 +541,17 @@ func openTarStream(archivePath, format string) (io.ReadCloser, error) {
 			compression = "zstd"
 		}
 	default:
-		_ = file.Close()
-		return nil, fmt.Errorf("unsupported tar compression format %q", format)
+		unsupportedErr := fmt.Errorf("unsupported tar compression format %q", format)
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.Join(unsupportedErr, fmt.Errorf("close tar archive: %w", closeErr))
+		}
+		return nil, unsupportedErr
 	}
 
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		_ = file.Close()
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("close tar archive: %w", closeErr))
+		}
 		return nil, err
 	}
 
@@ -539,8 +561,11 @@ func openTarStream(archivePath, format string) (io.ReadCloser, error) {
 	case "gzip":
 		reader, err := gzip.NewReader(file)
 		if err != nil {
-			_ = file.Close()
-			return nil, fmt.Errorf("open gzip archive: %w", err)
+			openErr := fmt.Errorf("open gzip archive: %w", err)
+			if closeErr := file.Close(); closeErr != nil {
+				return nil, errors.Join(openErr, fmt.Errorf("close archive: %w", closeErr))
+			}
+			return nil, openErr
 		}
 		return &tarReadCloser{Reader: reader, closers: []io.Closer{reader, file}}, nil
 	case "bzip2":
@@ -551,18 +576,28 @@ func openTarStream(archivePath, format string) (io.ReadCloser, error) {
 		cmd.Stdin = file
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			_ = file.Close()
+			if closeErr := file.Close(); closeErr != nil {
+				return nil, errors.Join(err, fmt.Errorf("close tar archive: %w", closeErr))
+			}
 			return nil, err
 		}
 		if err := cmd.Start(); err != nil {
-			_ = stdout.Close()
-			_ = file.Close()
-			return nil, fmt.Errorf("start %s decompressor: %w", program, err)
+			startErr := fmt.Errorf("start %s decompressor: %w", program, err)
+			if closeErr := stdout.Close(); closeErr != nil {
+				startErr = errors.Join(startErr, fmt.Errorf("close decompressor pipe: %w", closeErr))
+			}
+			if closeErr := file.Close(); closeErr != nil {
+				startErr = errors.Join(startErr, fmt.Errorf("close tar archive: %w", closeErr))
+			}
+			return nil, startErr
 		}
 		return &commandTarReadCloser{ReadCloser: stdout, cmd: cmd, input: file}, nil
 	default:
-		_ = file.Close()
-		return nil, fmt.Errorf("unsupported tar compression %q", compression)
+		unsupportedErr := fmt.Errorf("unsupported tar compression %q", compression)
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.Join(unsupportedErr, fmt.Errorf("close tar archive: %w", closeErr))
+		}
+		return nil, unsupportedErr
 	}
 }
 
