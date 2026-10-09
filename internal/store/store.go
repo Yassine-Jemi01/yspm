@@ -297,10 +297,3 @@ func SaveSnapshotFor(user bool, snapshot model.Snapshot) error {
 	})
 }
 
-func TestMergeTransactionsPreservesConcurrentRecords(current, incoming []model.Transaction) []model.Transaction {
-	return mergeTransactions(current, incoming)
-}
-
-func TestMergeSnapshotsPreservesConcurrentRecords(current, incoming []model.Snapshot) []model.Snapshot {
-	return mergeSnapshots(current, incoming)
-}
