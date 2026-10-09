@@ -193,7 +193,7 @@ func parseDependencies(value string)[]model.Dependency{
 }
 
 func repoCommand(m *manager.Manager,args []string)error{
-	if len(args)==0{return fmt.Errorf("usage: yspm repo index|sign ...")}
+	if len(args)==0{return fmt.Errorf("usage: yspm repo index or sign")}
 	switch args[0]{
 	case "index":
 		fs:=flag.NewFlagSet("repo index",flag.ContinueOnError)
