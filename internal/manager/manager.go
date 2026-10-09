@@ -307,14 +307,43 @@ func matchesNameOrProvide(p model.Package,want string)bool{
 	return false
 }
 
-func parseDependency(s string)dependencyRequest{
-	s=strings.TrimSpace(s);arch:=""
-	if i:=strings.LastIndex(s,":");i>0&&!strings.Contains(s[i+1:],"/"){arch=config.NormalizeArch(s[i+1:]);s=s[:i]}
-	op,ver:=parseConstraint(s);name:=s
-	if op!=""{
-		idx:=strings.Index(s,op);name=strings.TrimSpace(s[:idx]);ver=strings.TrimSpace(s[idx+len(op):])
+func parseDependency(s string) dependencyRequest {
+	s = strings.TrimSpace(s)
+	arch := ""
+
+	op, ver := parseConstraint(s)
+	opIndex := -1
+	if op != "" {
+		opIndex = strings.Index(s, op)
 	}
-	return dependencyRequest{Name:name,Op:op,Version:ver,Arch:arch}
+	if colon := strings.LastIndex(s, ":"); colon > 0 && (opIndex < 0 || colon < opIndex) {
+		candidate := strings.TrimSpace(s[colon+1:])
+		if isArchitectureSuffix(candidate) {
+			arch = config.NormalizeArch(candidate)
+			s = strings.TrimSpace(s[:colon])
+			op, ver = parseConstraint(s)
+			opIndex = -1
+			if op != "" {
+				opIndex = strings.Index(s, op)
+			}
+		}
+	}
+	name := s
+	if opIndex >= 0 {
+		name = strings.TrimSpace(s[:opIndex])
+		ver = strings.TrimSpace(s[opIndex+len(op):])
+	}
+	return dependencyRequest{Name: name, Op: op, Version: ver, Arch: arch}
+}
+
+func isArchitectureSuffix(value string) bool {
+	normalized := config.NormalizeArch(value)
+	switch normalized {
+	case "x86_64", "aarch64", "i386", "armv7", "riscv64", "ppc64le", "s390x", "loongarch64", "armv6l":
+		return true
+	default:
+		return config.ForeignArchitectures()[normalized]
+	}
 }
 func parseConstraint(s string)(string,string){
 	for _,op:=range []string{"!=",">=","<=","=","<",">"}{if i:=strings.Index(s,op);i>0{return op,strings.TrimSpace(s[i+len(op):])}}
