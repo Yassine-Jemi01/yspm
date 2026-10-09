@@ -88,12 +88,10 @@ func (m *Manager) Update() error {
 	if err := repo.ValidateStableIndex(idx); err != nil {
 		return err
 	}
-	if config.IsHardcoreRepository() {
-		if err := repo.CacheIndexFor(m.User, m.repository, idx); err != nil {
+	if !config.IsHardcoreRepository() {
+		if err := repo.CacheIndexProofFor(m.User, m.repository, indexData, signature); err != nil {
 			return err
 		}
-	} else if err := repo.CacheIndexProofFor(m.User, m.repository, indexData, signature); err != nil {
-		return err
 	}
 	fmt.Printf("Release %s (%s) — %d packages — ABI %s.\n", idx.Release, idx.Channel, len(idx.Packages), valueOr(idx.ABI, "none"))
 	return nil
