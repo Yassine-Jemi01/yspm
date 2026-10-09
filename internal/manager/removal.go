@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,7 +41,10 @@ func RemovePackageFiles(m *Manager, p model.InstalledPackage, rb *transactionRol
 		if err:=os.MkdirAll(filepath.Dir(backup),0o755);err!=nil{return err}
 		if err:=os.Rename(target,backup);err!=nil{
 			if err:=copyNode(target,backup);err!=nil{return err}
-			if err:=os.RemoveAll(target);err!=nil{return err}
+			if err:=os.RemoveAll(target);err!=nil{
+				cleanupErr := os.RemoveAll(backup)
+				return errors.Join(fmt.Errorf("remove original path after making rollback copy: %w", err), cleanupErr)
+			}
 		}
 		rb.entries=append(rb.entries,rollbackEntry{target:target,backup:backup})
 	}
