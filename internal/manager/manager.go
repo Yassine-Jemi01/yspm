@@ -904,12 +904,7 @@ func (m *Manager) RunBackground(action string, args []string, yes, autoSnapshot 
 	if err != nil {
 		return m.finishFailed(tx, fmt.Errorf("open transaction log: %w", err))
 	}
-	workerArgs := []string{"__worker", action, tx.ID}
-	if autoSnapshot {
-		workerArgs = append(workerArgs, "--snapshot")
-	}
-	workerArgs = append(workerArgs, "--", strings.Join(args, "\x00"))
-	cmd := exec.Command(os.Args[0], workerArgs...)
+	cmd := exec.Command(os.Args[0], backgroundWorkerArgs(action, tx.ID, args, autoSnapshot))
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Env = append(os.Environ(), "YSPM_USER="+boolText(m.User), "YSPM_ARCH="+m.arch)
@@ -928,11 +923,17 @@ func (m *Manager) RunBackground(action string, args []string, yes, autoSnapshot 
 	return nil
 }
 
-func (m *Manager) Worker(action, id, packed string, yes, autoSnapshot bool) error {
-	args := []string{}
-	if packed != "" {
-		args = strings.Split(packed, "\x00")
+func backgroundWorkerArgs(action, id string, args []string, autoSnapshot bool) []string {
+	out := []string{"__worker", action, id}
+	if autoSnapshot {
+		out = append(out, "--snapshot")
 	}
+	out = append(out, "--")
+	out = append(out, args...)
+	return out
+}
+
+func (m *Manager) Worker(action, id string, args []string, yes, autoSnapshot bool) error {
 	var operationErr error
 	switch action {
 	case "install":
@@ -976,7 +977,7 @@ func (m *Manager) Worker(action, id, packed string, yes, autoSnapshot bool) erro
 
 func isLocalArchivePath(path string) bool {
 	x := strings.ToLower(strings.TrimSpace(path))
-	for _, suffix := range []string{".yspkg", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.zst", ".zip"} {
+	for _, suffix := range []string{".yspkg", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".tar.zst", ".tar.bz2", ".zip"} {
 		if strings.HasSuffix(x, suffix) {
 			return true
 		}
