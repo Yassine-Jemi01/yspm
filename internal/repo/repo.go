@@ -28,17 +28,43 @@ import (
 	"github.com/Yassine-Jemi01/yspm/internal/model"
 )
 
-func indexCachePath() (string, error) {
-	d, err := config.CacheDir()
+const (
+	maxRepositorySourceBytes int64 = 16 << 20
+	maxDownloadBytes         int64 = 4 << 30
+	maxZipEntries                  = 100_000
+	maxZipEntryBytes         uint64 = 4 << 30
+	maxZipExpandedBytes      uint64 = 8 << 30
+)
+
+type indexCacheEnvelope struct {
+	CacheVersion int    `json:"cache_version"`
+	Source       string `json:"source"`
+	IndexData    []byte `json:"index_data"`
+	Signature    []byte `json:"signature,omitempty"`
+}
+
+func indexCachePathFor(user bool) (string, error) {
+	d, err := config.CacheDirFor(user)
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(d, "index.json"), nil
 }
+
+func readBounded(r io.Reader, limit int64, what string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds the %d-byte size limit", what, limit)
+	}
+	return data, nil
+}
+
 func readSource(source string) ([]byte, error) {
 	if u, err := url.Parse(source); err == nil && u.Scheme != "" && u.Scheme != "file" {
-		r := &http.Client{Timeout: 45 * time.Second}
-		resp, err := r.Get(source)
+		resp, err := (&http.Client{Timeout: 45 * time.Second}).Get(source)
 		if err != nil {
 			return nil, err
 		}
@@ -46,84 +72,132 @@ func readSource(source string) ([]byte, error) {
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return nil, fmt.Errorf("repository returned HTTP %s", resp.Status)
 		}
-		return io.ReadAll(resp.Body)
+		return readBounded(resp.Body, maxRepositorySourceBytes, "repository source")
 	}
 	if u, err := url.Parse(source); err == nil && u.Scheme == "file" {
 		source = u.Path
 	}
-	return os.ReadFile(source)
+	f, err := os.Open(source)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readBounded(f, maxRepositorySourceBytes, "repository source")
 }
 
-func FetchIndex(source string) (model.Index, error) {
+// FetchIndexWithProof returns the exact index bytes and detached signature that
+// were verified. The proof is retained in cache so signature-required clients
+// can verify cached metadata offline instead of trusting a re-serialized JSON
+// object or bypassing signature verification on cache hits.
+func FetchIndexWithProof(source string) (model.Index, []byte, []byte, error) {
 	data, err := readSource(source)
 	if err != nil {
-		return model.Index{}, fmt.Errorf("fetch repository index: %w", err)
+		return model.Index{}, nil, nil, fmt.Errorf("fetch repository index: %w", err)
 	}
 	var idx model.Index
 	if err := json.Unmarshal(data, &idx); err != nil {
-		return model.Index{}, fmt.Errorf("invalid repository index: %w", err)
+		return model.Index{}, nil, nil, fmt.Errorf("invalid repository index: %w", err)
 	}
-	if idx.Release == "" || idx.Channel == "" {
-		return model.Index{}, errors.New("repository index is missing release/channel")
+	if err := ValidateStableIndex(idx); err != nil {
+		return model.Index{}, nil, nil, err
 	}
-	if err := ValidateStableIndex(idx); err != nil { return model.Index{}, err }
+	var signature []byte
 	if config.RequireRepositorySignature() {
-		if err := verifyIndexSignature(data); err != nil {
-			return model.Index{}, err
+		signature, err = fetchRepositorySignature()
+		if err != nil {
+			return model.Index{}, nil, nil, err
+		}
+		if err := verifyIndexSignatureBytes(data, signature); err != nil {
+			return model.Index{}, nil, nil, err
 		}
 	}
-	return idx, nil
+	return idx, data, signature, nil
 }
 
-func verifyIndexSignature(data []byte) error {
+func FetchIndex(source string) (model.Index, error) {
+	idx, _, _, err := FetchIndexWithProof(source)
+	return idx, err
+}
+
+func decodePublicKey() (ed25519.PublicKey, error) {
 	keyText := strings.TrimSpace(config.RepositoryPublicKey())
-	sigURL := strings.TrimSpace(config.RepositorySignatureURL())
-	if keyText == "" || sigURL == "" {
-		return errors.New("repository signatures are required but public key/signature URL are not configured")
+	if keyText == "" {
+		return nil, errors.New("repository signatures are required but no public key is configured")
 	}
-	keyRaw, err := hex.DecodeString(strings.TrimSpace(keyText))
+	keyRaw, err := hex.DecodeString(keyText)
 	if err != nil {
 		keyRaw, err = base64.StdEncoding.DecodeString(keyText)
 	}
 	if err != nil || len(keyRaw) != ed25519.PublicKeySize {
-		return errors.New("invalid Ed25519 repository public key")
+		return nil, errors.New("invalid Ed25519 repository public key")
 	}
-	sigRaw, err := readSource(sigURL)
+	return ed25519.PublicKey(keyRaw), nil
+}
+
+func fetchRepositorySignature() ([]byte, error) {
+	sigURL := strings.TrimSpace(config.RepositorySignatureURL())
+	if sigURL == "" {
+		return nil, errors.New("repository signatures are required but signature URL is not configured")
+	}
+	raw, err := readSource(sigURL)
 	if err != nil {
-		return fmt.Errorf("fetch repository signature: %w", err)
+		return nil, fmt.Errorf("fetch repository signature: %w", err)
 	}
-	sigText := strings.TrimSpace(string(sigRaw))
-	sig, err := hex.DecodeString(sigText)
+	text := strings.TrimSpace(string(raw))
+	signature, err := hex.DecodeString(text)
 	if err != nil {
-		sig, err = base64.StdEncoding.DecodeString(sigText)
+		signature, err = base64.StdEncoding.DecodeString(text)
 	}
-	if err != nil || len(sig) != ed25519.SignatureSize {
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return nil, errors.New("invalid repository signature")
+	}
+	return signature, nil
+}
+
+func verifyIndexSignatureBytes(data, signature []byte) error {
+	key, err := decodePublicKey()
+	if err != nil {
+		return err
+	}
+	if len(signature) != ed25519.SignatureSize {
 		return errors.New("invalid repository signature")
 	}
-	if !ed25519.Verify(ed25519.PublicKey(keyRaw), data, sig) {
+	if !ed25519.Verify(key, data, signature) {
 		return errors.New("repository signature verification failed")
 	}
 	return nil
 }
 
-func CacheIndex(idx model.Index) error {
-	path, err := indexCachePath()
+func verifyIndexSignature(data []byte) error {
+	signature, err := fetchRepositorySignature()
+	if err != nil {
+		return err
+	}
+	return verifyIndexSignatureBytes(data, signature)
+}
+
+func writeIndexCache(user bool, envelope indexCacheEnvelope) error {
+	path, err := indexCachePathFor(user)
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(idx, "", "  ")
+	data, err := json.Marshal(envelope)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "index-*.tmp")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".index-*.tmp")
 	if err != nil {
 		return err
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if _, err := tmp.Write(append(data, '\n')); err != nil {
 		_ = tmp.Close()
 		return err
@@ -138,8 +212,43 @@ func CacheIndex(idx model.Index) error {
 	return os.Rename(tmpPath, path)
 }
 
-func LoadCachedIndex() (model.Index, error) {
-	path, err := indexCachePath()
+func CacheIndexProofFor(user bool, source string, indexData, signature []byte) error {
+	var idx model.Index
+	if err := json.Unmarshal(indexData, &idx); err != nil {
+		return fmt.Errorf("refusing to cache invalid index JSON: %w", err)
+	}
+	if err := ValidateStableIndex(idx); err != nil {
+		return fmt.Errorf("refusing to cache invalid repository index: %w", err)
+	}
+	if config.RequireRepositorySignature() {
+		if err := verifyIndexSignatureBytes(indexData, signature); err != nil {
+			return fmt.Errorf("refusing to cache unverified repository index: %w", err)
+		}
+	}
+	return writeIndexCache(user, indexCacheEnvelope{
+		CacheVersion: 1,
+		Source:       source,
+		IndexData:    append([]byte(nil), indexData...),
+		Signature:    append([]byte(nil), signature...),
+	})
+}
+
+func CacheIndexFor(user bool, source string, idx model.Index) error {
+	data, err := json.MarshalIndent(idx, "", "  ")
+	if err != nil {
+		return err
+	}
+	return CacheIndexProofFor(user, source, append(data, '\n'), nil)
+}
+
+// CacheIndex is retained for internal callers that use the conventional system
+// cache. Signed callers should use CacheIndexProofFor to preserve original bytes.
+func CacheIndex(idx model.Index) error {
+	return CacheIndexFor(os.Geteuid() != 0, "", idx)
+}
+
+func LoadCachedIndexFor(user bool, source string) (model.Index, error) {
+	path, err := indexCachePathFor(user)
 	if err != nil {
 		return model.Index{}, err
 	}
@@ -147,11 +256,44 @@ func LoadCachedIndex() (model.Index, error) {
 	if err != nil {
 		return model.Index{}, err
 	}
+
+	var envelope indexCacheEnvelope
+	if err := json.Unmarshal(data, &envelope); err == nil && envelope.CacheVersion == 1 && len(envelope.IndexData) != 0 {
+		if envelope.Source != source {
+			return model.Index{}, fmt.Errorf("cached repository index source mismatch: cached %q, requested %q", envelope.Source, source)
+		}
+		if config.RequireRepositorySignature() {
+			if err := verifyIndexSignatureBytes(envelope.IndexData, envelope.Signature); err != nil {
+				return model.Index{}, fmt.Errorf("cached repository signature verification failed: %w", err)
+			}
+		}
+		var idx model.Index
+		if err := json.Unmarshal(envelope.IndexData, &idx); err != nil {
+			return model.Index{}, fmt.Errorf("invalid cached repository index: %w", err)
+		}
+		if err := ValidateStableIndex(idx); err != nil {
+			return model.Index{}, fmt.Errorf("invalid cached repository index: %w", err)
+		}
+		return idx, nil
+	}
+
+	// Legacy caches had no retained signature proof. They are not trusted when
+	// signatures are required; the caller will fetch a fresh verified index.
+	if config.RequireRepositorySignature() {
+		return model.Index{}, errors.New("cached repository index has no verifiable signature proof")
+	}
 	var idx model.Index
 	if err := json.Unmarshal(data, &idx); err != nil {
 		return model.Index{}, fmt.Errorf("invalid cached repository index: %w", err)
 	}
+	if err := ValidateStableIndex(idx); err != nil {
+		return model.Index{}, fmt.Errorf("invalid cached repository index: %w", err)
+	}
 	return idx, nil
+}
+
+func LoadCachedIndex() (model.Index, error) {
+	return LoadCachedIndexFor(os.Geteuid() != 0, "")
 }
 
 func CurrentSystem() (string, string) { return runtime.GOOS, runtime.GOARCH }
