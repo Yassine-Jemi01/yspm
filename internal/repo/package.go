@@ -81,7 +81,7 @@ func (r *boundedPackageTarReader) Next() (*tar.Header, error) {
 		return nil, err
 	}
 	switch header.Typeflag {
-	case tar.TypeReg, tar.TypeRegA:
+	case tar.TypeReg, tar.TypeReg:
 		if r.expanded > maxTarExpandedBytes-header.Size {
 			return nil, fmt.Errorf("package archive exceeds %d-byte expanded-size limit", maxTarExpandedBytes)
 		}
@@ -129,7 +129,7 @@ func ReadPackageMetadata(path string) (pkg model.Package, retErr error) {
 		if h == nil {
 			break
 		}
-		if h.Name != "metadata.json" || h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
+		if h.Name != "metadata.json" || h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeReg {
 			continue
 		}
 		data, err := io.ReadAll(io.LimitReader(r.tar, (64<<20)+1))
@@ -164,7 +164,7 @@ func ReadPackageData(path string) (out PackageData, retErr error) {
 			break
 		}
 		switch {
-		case h.Name == "metadata.json" && (h.Typeflag == tar.TypeReg || h.Typeflag == tar.TypeRegA):
+		case h.Name == "metadata.json" && (h.Typeflag == tar.TypeReg || h.Typeflag == tar.TypeReg):
 			data, err := io.ReadAll(io.LimitReader(r.tar, (64<<20)+1))
 			if err != nil {
 				return PackageData{}, err
@@ -176,7 +176,7 @@ func ReadPackageData(path string) (out PackageData, retErr error) {
 				return PackageData{}, fmt.Errorf("invalid package metadata: %w", err)
 			}
 			metadataSeen = true
-		case strings.HasPrefix(h.Name, "scripts/") && (h.Typeflag == tar.TypeReg || h.Typeflag == tar.TypeRegA):
+		case strings.HasPrefix(h.Name, "scripts/") && (h.Typeflag == tar.TypeReg || h.Typeflag == tar.TypeReg):
 			data, err := io.ReadAll(io.LimitReader(r.tar, (8<<20)+1))
 			if err != nil {
 				return PackageData{}, err
@@ -222,11 +222,11 @@ func ExtractPackage(path, destination string) (retErr error) {
 				return fmt.Errorf("invalid package root entry")
 			}
 		case entry.name == "metadata.json":
-			if entry.typeflag != tar.TypeReg && entry.typeflag != tar.TypeRegA {
+			if entry.typeflag != tar.TypeReg && entry.typeflag != tar.TypeReg {
 				return errors.New("metadata.json must be a regular file")
 			}
 		case entry.name == "scripts" || strings.HasPrefix(entry.name, "scripts/"):
-			if entry.typeflag != tar.TypeDir && entry.typeflag != tar.TypeReg && entry.typeflag != tar.TypeRegA {
+			if entry.typeflag != tar.TypeDir && entry.typeflag != tar.TypeReg && entry.typeflag != tar.TypeReg {
 				return fmt.Errorf("invalid script entry %q", entry.name)
 			}
 		case entry.name == "root":
@@ -300,7 +300,7 @@ func ExtractPackage(path, destination string) (retErr error) {
 			directories = append(directories, entry)
 			continue
 		}
-		if entry.typeflag != tar.TypeReg && entry.typeflag != tar.TypeRegA {
+		if entry.typeflag != tar.TypeReg && entry.typeflag != tar.TypeReg {
 			return fmt.Errorf("unsupported package entry type %q", header.Typeflag)
 		}
 		parent, err := ensureTarDirectories(root, pathpkg.Dir(rel))
@@ -410,7 +410,7 @@ func ListPackageFiles(path string) (out []model.FileEntry, retErr error) {
 				return nil, fmt.Errorf("unsafe package symlink %q: %w", rel, err)
 			}
 			entry.Type, entry.LinkTarget = "symlink", h.Linkname
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg, tar.TypeReg:
 			hash := sha256.New()
 			if _, err := io.CopyN(hash, r.tar, h.Size); err != nil {
 				return nil, err
