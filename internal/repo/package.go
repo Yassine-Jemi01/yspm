@@ -129,7 +129,7 @@ func ReadPackageMetadata(path string) (pkg model.Package, retErr error) {
 		if h == nil {
 			break
 		}
-		if h.Name != "metadata.json" || h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeReg {
+		if h.Name != "metadata.json" || h.Typeflag != tar.TypeReg {
 			continue
 		}
 		data, err := io.ReadAll(io.LimitReader(r.tar, (64<<20)+1))
@@ -222,11 +222,11 @@ func ExtractPackage(path, destination string) (retErr error) {
 				return fmt.Errorf("invalid package root entry")
 			}
 		case entry.name == "metadata.json":
-			if entry.typeflag != tar.TypeReg && entry.typeflag != tar.TypeReg {
+			if entry.typeflag != tar.TypeReg {
 				return errors.New("metadata.json must be a regular file")
 			}
 		case entry.name == "scripts" || strings.HasPrefix(entry.name, "scripts/"):
-			if entry.typeflag != tar.TypeDir && entry.typeflag != tar.TypeReg && entry.typeflag != tar.TypeReg {
+			if entry.typeflag != tar.TypeDir && entry.typeflag != tar.TypeReg {
 				return fmt.Errorf("invalid script entry %q", entry.name)
 			}
 		case entry.name == "root":
@@ -300,7 +300,7 @@ func ExtractPackage(path, destination string) (retErr error) {
 			directories = append(directories, entry)
 			continue
 		}
-		if entry.typeflag != tar.TypeReg && entry.typeflag != tar.TypeReg {
+		if entry.typeflag != tar.TypeReg {
 			return fmt.Errorf("unsupported package entry type %q", header.Typeflag)
 		}
 		parent, err := ensureTarDirectories(root, pathpkg.Dir(rel))
